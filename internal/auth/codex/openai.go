@@ -19,6 +19,8 @@ type CodexTokenData struct {
 	AccessToken string `json:"access_token"`
 	// RefreshToken is used to obtain new access tokens
 	RefreshToken string `json:"refresh_token"`
+	// SessionToken is the web session cookie value used to renew access when refresh tokens are unavailable.
+	SessionToken string `json:"session_token,omitempty"`
 	// AccountID is the OpenAI account identifier
 	AccountID string `json:"account_id"`
 	// Email is the OpenAI account email

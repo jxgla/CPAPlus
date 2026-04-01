@@ -21,10 +21,12 @@ import (
 
 // OAuth configuration constants for OpenAI Codex
 const (
-	AuthURL     = "https://auth.openai.com/oauth/authorize"
-	TokenURL    = "https://auth.openai.com/oauth/token"
-	ClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RedirectURI = "http://localhost:1455/auth/callback"
+	AuthURL           = "https://auth.openai.com/oauth/authorize"
+	TokenURL          = "https://auth.openai.com/oauth/token"
+	ChatGPTBaseURL    = "https://chatgpt.com"
+	ChatGPTSessionURL = ChatGPTBaseURL + "/api/auth/session"
+	ClientID          = "app_EMoamEEZ73f0CkXaXp7hrann"
+	RedirectURI       = "http://localhost:1455/auth/callback"
 )
 
 // CodexAuth handles the OpenAI OAuth2 authentication flow.
@@ -237,6 +239,76 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 		AccountID:    accountID,
 		Email:        email,
 		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}, nil
+}
+
+func (o *CodexAuth) RefreshFromSessionToken(ctx context.Context, sessionToken string) (*CodexTokenData, error) {
+	if strings.TrimSpace(sessionToken) == "" {
+		return nil, fmt.Errorf("session token is required")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ChatGPTSessionURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session refresh request: %w", err)
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Cookie", "__Secure-next-auth.session-token="+sessionToken)
+	req.Header.Set("Referer", ChatGPTBaseURL+"/")
+
+	resp, err := o.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("session refresh request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read session refresh response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("session refresh failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var sessionResp struct {
+		AccessToken  string `json:"accessToken"`
+		SessionToken string `json:"sessionToken"`
+		Expires      string `json:"expires"`
+		User         struct {
+			Email string `json:"email"`
+		} `json:"user"`
+		Account struct {
+			ID string `json:"id"`
+		} `json:"account"`
+	}
+	if err = json.Unmarshal(body, &sessionResp); err != nil {
+		return nil, fmt.Errorf("failed to parse session refresh response: %w", err)
+	}
+	if strings.TrimSpace(sessionResp.AccessToken) == "" {
+		return nil, fmt.Errorf("session refresh response missing access token")
+	}
+
+	accountID := strings.TrimSpace(sessionResp.Account.ID)
+	email := strings.TrimSpace(sessionResp.User.Email)
+	if claims, err := ParseJWTToken(sessionResp.AccessToken); err == nil && claims != nil {
+		if accountID == "" {
+			accountID = strings.TrimSpace(claims.GetAccountID())
+		}
+		if email == "" {
+			email = strings.TrimSpace(claims.GetUserEmail())
+		}
+	} else if err != nil {
+		log.Warnf("Failed to parse refreshed access token: %v", err)
+	}
+
+	return &CodexTokenData{
+		AccessToken:  strings.TrimSpace(sessionResp.AccessToken),
+		SessionToken: strings.TrimSpace(sessionResp.SessionToken),
+		AccountID:    accountID,
+		Email:        email,
+		Expire:       strings.TrimSpace(sessionResp.Expires),
 	}, nil
 }
 

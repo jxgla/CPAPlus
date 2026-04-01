@@ -567,26 +567,42 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 		return nil, statusErr{code: 500, msg: "codex executor: auth is nil"}
 	}
 	var refreshToken string
+	var sessionToken string
 	if auth.Metadata != nil {
 		if v, ok := auth.Metadata["refresh_token"].(string); ok && v != "" {
 			refreshToken = v
 		}
+		if v, ok := auth.Metadata["session_token"].(string); ok && v != "" {
+			sessionToken = v
+		}
 	}
-	if refreshToken == "" {
+	if refreshToken == "" && sessionToken == "" {
 		return auth, nil
-	}
-	svc := codexauth.NewCodexAuth(e.cfg)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
-	if err != nil {
-		return nil, err
 	}
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
+	}
+
+	svc := codexauth.NewCodexAuth(e.cfg)
+	var (
+		td  *codexauth.CodexTokenData
+		err error
+	)
+	if refreshToken != "" {
+		td, err = svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	} else {
+		td, err = svc.RefreshFromSessionToken(ctx, sessionToken)
+	}
+	if err != nil {
+		return nil, err
 	}
 	auth.Metadata["id_token"] = td.IDToken
 	auth.Metadata["access_token"] = td.AccessToken
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
+	}
+	if td.SessionToken != "" {
+		auth.Metadata["session_token"] = td.SessionToken
 	}
 	if td.AccountID != "" {
 		auth.Metadata["account_id"] = td.AccountID

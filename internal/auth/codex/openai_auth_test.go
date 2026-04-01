@@ -42,3 +42,53 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 		t.Fatalf("expected 1 refresh attempt, got %d", got)
 	}
 }
+
+func TestRefreshFromSessionToken_ParsesSessionPayload(t *testing.T) {
+	auth := &CodexAuth{
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Method != http.MethodGet {
+					t.Fatalf("expected GET request, got %s", req.Method)
+				}
+				if req.URL.String() != ChatGPTSessionURL {
+					t.Fatalf("expected %s, got %s", ChatGPTSessionURL, req.URL.String())
+				}
+				if got := req.Header.Get("Cookie"); !strings.Contains(got, "__Secure-next-auth.session-token=test_session") {
+					t.Fatalf("expected session cookie, got %q", got)
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body: io.NopCloser(strings.NewReader(`{
+						"accessToken":"eyJhbGciOiJub25lIn0.eyJlbWFpbCI6InNlc3Npb25AZXhhbXBsZS5jb20iLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xMjMifX0.",
+						"sessionToken":"rotated_session",
+						"expires":"2026-06-27T17:03:48.205Z",
+						"user":{"email":"session@example.com"},
+						"account":{"id":"acct_123"}
+					}`)),
+					Header:  make(http.Header),
+					Request: req,
+				}, nil
+			}),
+		},
+	}
+
+	td, err := auth.RefreshFromSessionToken(context.Background(), "test_session")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if td.AccessToken == "" {
+		t.Fatalf("expected access token")
+	}
+	if td.SessionToken != "rotated_session" {
+		t.Fatalf("expected rotated session token, got %q", td.SessionToken)
+	}
+	if td.AccountID != "acct_123" {
+		t.Fatalf("expected account id acct_123, got %q", td.AccountID)
+	}
+	if td.Email != "session@example.com" {
+		t.Fatalf("expected email session@example.com, got %q", td.Email)
+	}
+	if td.Expire != "2026-06-27T17:03:48.205Z" {
+		t.Fatalf("expected expiry from session payload, got %q", td.Expire)
+	}
+}
