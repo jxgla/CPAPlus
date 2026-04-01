@@ -484,31 +484,32 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return nil
 	}
-	idTokenRaw, ok := auth.Metadata["id_token"].(string)
-	if !ok {
-		return nil
-	}
-	idToken := strings.TrimSpace(idTokenRaw)
-	if idToken == "" {
-		return nil
-	}
-	claims, err := codex.ParseJWTToken(idToken)
-	if err != nil || claims == nil {
-		return nil
-	}
 
 	result := gin.H{}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
-		result["chatgpt_account_id"] = v
+	if accountIDRaw, ok := auth.Metadata["account_id"].(string); ok {
+		if accountID := strings.TrimSpace(accountIDRaw); accountID != "" {
+			result["chatgpt_account_id"] = accountID
+		}
 	}
-	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
-		result["plan_type"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
-		result["chatgpt_subscription_active_start"] = v
-	}
-	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
-		result["chatgpt_subscription_active_until"] = v
+
+	idTokenRaw, _ := auth.Metadata["id_token"].(string)
+	idToken := strings.TrimSpace(idTokenRaw)
+	if idToken != "" {
+		claims, err := codex.ParseJWTToken(idToken)
+		if err == nil && claims != nil {
+			if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptAccountID); v != "" {
+				result["chatgpt_account_id"] = v
+			}
+			if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
+				result["plan_type"] = v
+			}
+			if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
+				result["chatgpt_subscription_active_start"] = v
+			}
+			if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveUntil; v != nil {
+				result["chatgpt_subscription_active_until"] = v
+			}
+		}
 	}
 
 	if len(result) == 0 {
