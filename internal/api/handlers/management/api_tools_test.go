@@ -7,8 +7,38 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
+
+type stubProviderExecutor struct {
+	refresh func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
+}
+
+func (s *stubProviderExecutor) Identifier() string { return "codex" }
+
+func (s *stubProviderExecutor) Execute(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (s *stubProviderExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, nil
+}
+
+func (s *stubProviderExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if s.refresh != nil {
+		return s.refresh(ctx, auth)
+	}
+	return auth, nil
+}
+
+func (s *stubProviderExecutor) CountTokens(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, nil
+}
+
+func (s *stubProviderExecutor) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
 
 func TestAPICallTransportDirectBypassesGlobalProxy(t *testing.T) {
 	t.Parallel()
@@ -109,5 +139,48 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestResolveTokenForAuthRefreshesCodexAndPersists(t *testing.T) {
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+		cloned := auth.Clone()
+		if cloned.Metadata == nil {
+			cloned.Metadata = map[string]any{}
+		}
+		cloned.Metadata["access_token"] = "fresh_access"
+		cloned.Metadata["session_token"] = "fresh_session"
+		return cloned, nil
+	}})
+
+	auth := &coreauth.Auth{
+		ID:       "codex-auth",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"access_token":  "stale_access",
+			"session_token": "old_session",
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register codex auth: %v", err)
+	}
+
+	h := &Handler{authManager: manager}
+	token, err := h.resolveTokenForAuth(context.Background(), auth)
+	if err != nil {
+		t.Fatalf("resolveTokenForAuth returned error: %v", err)
+	}
+	if token != "fresh_access" {
+		t.Fatalf("token = %q, want fresh_access", token)
+	}
+
+	stored, ok := manager.GetByID(auth.ID)
+	if !ok || stored == nil {
+		t.Fatal("expected persisted auth in manager")
+	}
+	if got := tokenValueFromMetadata(stored.Metadata); got != "fresh_access" {
+		t.Fatalf("persisted access token = %q, want fresh_access", got)
 	}
 }

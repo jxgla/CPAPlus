@@ -590,6 +590,10 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	)
 	if refreshToken != "" {
 		td, err = svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+		if err != nil && sessionToken != "" {
+			log.Warnf("codex executor: refresh token refresh failed, falling back to session token: %v", err)
+			td, err = svc.RefreshFromSessionToken(ctx, sessionToken)
+		}
 	} else {
 		td, err = svc.RefreshFromSessionToken(ctx, sessionToken)
 	}

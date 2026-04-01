@@ -325,6 +325,17 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
+	if provider == "codex" && h != nil && h.authManager != nil {
+		if exec, ok := h.authManager.Executor(auth.Provider); ok && exec != nil {
+			updated, errRefresh := exec.Refresh(ctx, auth.Clone())
+			if errRefresh == nil && updated != nil {
+				auth = updated
+				_, _ = h.authManager.Update(ctx, updated)
+			} else if errRefresh != nil {
+				return "", errRefresh
+			}
+		}
+	}
 
 	return tokenValueForAuth(auth), nil
 }
