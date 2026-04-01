@@ -152,6 +152,38 @@ func TestCodexExecutorCacheHelper_OpenAIChatCompletions_FallsBackToStableAuthID(
 	}
 }
 
+func TestApplyCodexHeaders_UsesMetadataBrowserBindings(t *testing.T) {
+	req := httptest.NewRequest("POST", "https://example.com/responses", nil)
+	req = req.WithContext(context.Background())
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{
+			"account_id":    "acct_123",
+			"user_agent":    "Mozilla/5.0 Test",
+			"device_id":     "device-xyz",
+			"session_token": "session-abc",
+		},
+	}
+
+	applyCodexHeaders(req, auth, "access-token", false, nil)
+
+	if got := req.Header.Get("Authorization"); got != "Bearer access-token" {
+		t.Fatalf("Authorization = %q, want %q", got, "Bearer access-token")
+	}
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct_123" {
+		t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "acct_123")
+	}
+	if got := req.Header.Get("User-Agent"); got != "Mozilla/5.0 Test" {
+		t.Fatalf("User-Agent = %q, want %q", got, "Mozilla/5.0 Test")
+	}
+	if got := req.Header.Get("oai-device-id"); got != "device-xyz" {
+		t.Fatalf("oai-device-id = %q, want %q", got, "device-xyz")
+	}
+	if got := req.Header.Get("Cookie"); got != "__Secure-next-auth.session-token=session-abc" {
+		t.Fatalf("Cookie = %q, want session cookie", got)
+	}
+}
+
 func TestCodexExecutorCacheHelper_ClaudePreservesCacheContinuity(t *testing.T) {
 	executor := &CodexExecutor{}
 	req := cliproxyexecutor.Request{

@@ -692,17 +692,39 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		r.Header.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
-		if auth != nil && auth.Metadata != nil {
-			if accountID, ok := auth.Metadata["account_id"].(string); ok {
-				r.Header.Set("Chatgpt-Account-Id", accountID)
-			}
-		}
+		applyCodexMetadataHeaders(r.Header, auth)
 	}
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func applyCodexMetadataHeaders(headers http.Header, auth *cliproxyauth.Auth) {
+	if headers == nil || auth == nil || auth.Metadata == nil {
+		return
+	}
+	if accountID, ok := auth.Metadata["account_id"].(string); ok {
+		if trimmed := strings.TrimSpace(accountID); trimmed != "" {
+			headers.Set("Chatgpt-Account-Id", trimmed)
+		}
+	}
+	if userAgent, ok := auth.Metadata["user_agent"].(string); ok {
+		if trimmed := strings.TrimSpace(userAgent); trimmed != "" {
+			headers.Set("User-Agent", trimmed)
+		}
+	}
+	if deviceID, ok := auth.Metadata["device_id"].(string); ok {
+		if trimmed := strings.TrimSpace(deviceID); trimmed != "" {
+			headers.Set("oai-device-id", trimmed)
+		}
+	}
+	if sessionToken, ok := auth.Metadata["session_token"].(string); ok {
+		if trimmed := strings.TrimSpace(sessionToken); trimmed != "" {
+			headers.Set("Cookie", "__Secure-next-auth.session-token="+trimmed)
+		}
+	}
 }
 
 func newCodexStatusErr(statusCode int, body []byte) statusErr {
