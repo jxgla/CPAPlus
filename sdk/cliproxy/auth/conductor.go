@@ -1866,30 +1866,13 @@ func shouldForceCodexRefresh(auth *Auth, result Result) bool {
 	if status != http.StatusUnauthorized && status != http.StatusTooManyRequests {
 		return false
 	}
-	if auth.Metadata == nil {
-		return false
-	}
-	hasSession := false
-	if v, ok := auth.Metadata["session_token"].(string); ok {
-		hasSession = strings.TrimSpace(v) != ""
-	}
-	if !hasSession {
-		return false
-	}
-	refreshToken := ""
-	if v, ok := auth.Metadata["refresh_token"].(string); ok {
-		refreshToken = strings.TrimSpace(v)
-	}
-	if refreshToken == "" {
-		return true
-	}
 	if status == http.StatusUnauthorized {
 		return true
 	}
-	return false
+	return CodexRefreshTokenNeedsSupplement(auth)
 }
 
-func shouldSupplementCodexRefreshToken(auth *Auth) bool {
+func CodexRefreshTokenNeedsSupplement(auth *Auth) bool {
 	if auth == nil {
 		return false
 	}
@@ -1899,23 +1882,46 @@ func shouldSupplementCodexRefreshToken(auth *Auth) bool {
 	if auth.Metadata == nil {
 		return false
 	}
-	sessionToken, _ := auth.Metadata["session_token"].(string)
-	if strings.TrimSpace(sessionToken) == "" {
-		return false
-	}
 	refreshToken, _ := auth.Metadata["refresh_token"].(string)
 	return strings.TrimSpace(refreshToken) == ""
 }
 
-func (m *Manager) supplementCodexRefreshToken(ctx context.Context, auth *Auth) *Auth {
+func shouldSupplementCodexRefreshToken(auth *Auth) bool {
+	return CodexRefreshTokenNeedsSupplement(auth)
+}
+
+func (m *Manager) RecoverCodexTokens(ctx context.Context, auth *Auth) (*Auth, error) {
 	if m == nil || auth == nil {
-		return auth
+		return auth, nil
 	}
-	if !shouldSupplementCodexRefreshToken(auth) {
-		return auth
+	if !CodexRefreshTokenNeedsSupplement(auth) {
+		return auth, nil
+	}
+	if !auth.NextRefreshAfter.IsZero() && time.Now().Before(auth.NextRefreshAfter) {
+		if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
+			return updated, nil
+		}
+		return auth, nil
 	}
 	m.refreshAuth(ctx, auth.ID)
 	if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
+		if CodexRefreshTokenNeedsSupplement(updated) {
+			return updated, &Error{Code: "codex_refresh_token_missing", Message: "codex refresh token remains missing after refresh"}
+		}
+		return updated, nil
+	}
+	if CodexRefreshTokenNeedsSupplement(auth) {
+		return auth, &Error{Code: "codex_refresh_token_missing", Message: "codex refresh token remains missing after refresh"}
+	}
+	return auth, nil
+}
+
+func (m *Manager) supplementCodexRefreshToken(ctx context.Context, auth *Auth) *Auth {
+	updated, err := m.RecoverCodexTokens(ctx, auth)
+	if err != nil {
+		log.WithError(err).Debug("codex preflight supplement failed")
+	}
+	if updated != nil {
 		return updated
 	}
 	return auth

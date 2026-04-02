@@ -213,7 +213,7 @@ func TestListAuthFiles_ExposesCodexRefreshTokenMissingFlag(t *testing.T) {
 		path string
 		data string
 	}{
-		{missingPath, `{"type":"codex","session_token":"session-only"}`},
+		{missingPath, `{"type":"codex","access_token":"access-only"}`},
 		{okPath, `{"type":"codex","session_token":"session","refresh_token":"refresh"}`},
 	} {
 		if err := os.WriteFile(item.path, []byte(item.data), 0o600); err != nil {
@@ -241,13 +241,18 @@ func TestListAuthFiles_ExposesCodexRefreshTokenMissingFlag(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	flags := map[string]bool{}
+	present := map[string]bool{}
 	for _, file := range payload.Files {
 		name, _ := file["name"].(string)
 		flag, _ := file["codex_refresh_token_missing"].(bool)
 		flags[name] = flag
+		present[name] = true
 	}
 	if !flags["missing.json"] {
 		t.Fatalf("expected missing.json to be flagged")
+	}
+	if !present["ok.json"] {
+		t.Fatalf("expected ok.json to be present in response")
 	}
 	if flags["ok.json"] {
 		t.Fatalf("expected ok.json not to be flagged")
@@ -328,6 +333,65 @@ func TestSupplementCodexRefreshTokens_RefreshesEligibleAuths(t *testing.T) {
 	}
 }
 
+func TestSupplementCodexRefreshTokens_ReportsStage1SessionRecoveryFailure(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, _ *coreauth.Auth) (*coreauth.Auth, error) {
+		return &coreauth.Auth{Metadata: map[string]any{"refresh_token": ""}}, nil
+	}})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	path := filepath.Join(authDir, "stage1.json")
+	data := `{"type":"codex","access_token":"access-only"}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	if err := h.registerAuthFromFile(context.Background(), path, []byte(data)); err != nil {
+		t.Fatalf("register auth from file: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/codex-refresh-token/supplement", bytes.NewBufferString(`{"only_missing":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.SupplementCodexRefreshTokens(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected supplement status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Status  string           `json:"status"`
+		Summary map[string]any   `json:"summary"`
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Status != "partial" {
+		t.Fatalf("status = %q, want partial", payload.Status)
+	}
+	if got := int(payload.Summary["failed"].(float64)); got != 1 {
+		t.Fatalf("failed = %d, want 1", got)
+	}
+	if len(payload.Results) != 1 {
+		t.Fatalf("results length = %d, want 1", len(payload.Results))
+	}
+	reason, _ := payload.Results[0]["reason"].(string)
+	if reason != "stage1_session_recovery_failed" {
+		t.Fatalf("reason = %q, want stage1_session_recovery_failed", reason)
+	}
+	sessionPresent, _ := payload.Results[0]["session_token_present"].(bool)
+	if sessionPresent {
+		t.Fatalf("session_token_present = true, want false")
+	}
+}
+
 func TestSupplementCodexRefreshTokens_ReturnsPartialOnRefreshFailure(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -386,5 +450,14 @@ func TestSupplementCodexRefreshTokens_ReturnsPartialOnRefreshFailure(t *testing.
 	}
 	if got := int(payload.Summary["failed"].(float64)); got != 1 {
 		t.Fatalf("failed = %d, want 1", got)
+	}
+	failedReasons := map[string]string{}
+	for _, item := range payload.Results {
+		name, _ := item["name"].(string)
+		reason, _ := item["reason"].(string)
+		failedReasons[name] = reason
+	}
+	if failedReasons["bad.json"] != "stage2_refresh_token_recovery_failed" {
+		t.Fatalf("bad.json reason = %q, want stage2_refresh_token_recovery_failed", failedReasons["bad.json"])
 	}
 }

@@ -290,19 +290,81 @@ const managementSupplementSnippet = `<script>
     }
   });
 
-  function boot() {
-    if (!ensureInlineUI()) return false;
-    refreshSummary();
-    return true;
+  let ensureUITimer = null;
+
+  function scheduleEnsureUI() {
+    if (ensureUITimer) return;
+    ensureUITimer = setTimeout(function(){
+      ensureUITimer = null;
+      const existsBefore = !!document.getElementById('cpa-inline-rt-btn');
+      const ready = ensureInlineUI();
+      if (!ready) return;
+      if (!existsBefore) {
+        refreshSummary();
+      }
+    }, 80);
   }
 
-  if (!boot()) {
+  function installRouteHooks() {
+    if (window.__CPA_CODEX_REFRESH_SUPPLEMENT_ROUTE_HOOKED__) return;
+    window.__CPA_CODEX_REFRESH_SUPPLEMENT_ROUTE_HOOKED__ = true;
+
+    const rawPushState = history.pushState;
+    if (typeof rawPushState === 'function') {
+      history.pushState = function() {
+        const out = rawPushState.apply(this, arguments);
+        scheduleEnsureUI();
+        return out;
+      };
+    }
+
+    const rawReplaceState = history.replaceState;
+    if (typeof rawReplaceState === 'function') {
+      history.replaceState = function() {
+        const out = rawReplaceState.apply(this, arguments);
+        scheduleEnsureUI();
+        return out;
+      };
+    }
+
+    window.addEventListener('popstate', scheduleEnsureUI);
+    window.addEventListener('hashchange', scheduleEnsureUI);
+  }
+
+  function installObserver() {
+    if (window.__CPA_CODEX_REFRESH_SUPPLEMENT_OBSERVER__) return;
+    const target = document.body || document.documentElement;
+    if (!target || typeof MutationObserver === 'undefined') return;
+
+    const observer = new MutationObserver(function(mutations){
+      for (const mutation of mutations || []) {
+        if (mutation.type === 'childList' && ((mutation.addedNodes && mutation.addedNodes.length) || (mutation.removedNodes && mutation.removedNodes.length))) {
+          scheduleEnsureUI();
+          break;
+        }
+      }
+    });
+    observer.observe(target, { childList: true, subtree: true });
+    window.__CPA_CODEX_REFRESH_SUPPLEMENT_OBSERVER__ = observer;
+  }
+
+  function boot() {
+    ensureStyles();
+    installRouteHooks();
+    installObserver();
+    scheduleEnsureUI();
+
     let retries = 0;
     const timer = setInterval(function(){
       retries += 1;
-      if (boot() || retries >= 60) clearInterval(timer);
+      scheduleEnsureUI();
+      if (document.getElementById('cpa-inline-rt-btn') || retries >= 60) {
+        clearInterval(timer);
+      }
     }, 1000);
   }
+
+  boot();
 })();
 </script>`
 

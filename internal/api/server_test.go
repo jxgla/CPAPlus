@@ -239,7 +239,10 @@ func TestServeManagementControlPanel_FallsBackToLocalHTML(t *testing.T) {
 	if !strings.Contains(body, "cpa_management_key") {
 		t.Fatalf("expected management key storage hook, got %s", body)
 	}
-	if !strings.Contains(body, "/v0/management/auth-files/codex-refresh-token/supplement") {
-		t.Fatalf("expected supplement endpoint in injected html, got %s", body)
+	if !strings.Contains(body, "MutationObserver") {
+		t.Fatalf("expected mutation observer based reinjection hook, got %s", body)
+	}
+	if !strings.Contains(body, "history.pushState") || !strings.Contains(body, "history.replaceState") {
+		t.Fatalf("expected SPA history hooks for reinjection, got %s", body)
 	}
 }

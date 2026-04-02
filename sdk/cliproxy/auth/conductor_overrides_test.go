@@ -564,7 +564,6 @@ func TestManager_Execute_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *t
 		ID:       "codex-prefill-refresh",
 		Provider: "codex",
 		Metadata: map[string]any{
-			"session_token": "session-value",
 			"refresh_token": "",
 		},
 	}
@@ -610,7 +609,6 @@ func TestManager_ExecuteCount_CodexMissingRefreshTokenGetsSupplementedBeforeCall
 		ID:       "codex-count-prefill-refresh",
 		Provider: "codex",
 		Metadata: map[string]any{
-			"session_token": "session-value",
 			"refresh_token": "",
 		},
 	}

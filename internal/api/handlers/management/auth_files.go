@@ -885,21 +885,23 @@ func uniqueAuthIdentifiers(names []string) []string {
 }
 
 func codexRefreshTokenNeedsSupplement(auth *coreauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		return false
-	}
-	if auth.Metadata == nil {
+	return coreauth.CodexRefreshTokenNeedsSupplement(auth)
+}
+
+func codexSessionTokenPresent(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
 		return false
 	}
 	sessionToken, _ := auth.Metadata["session_token"].(string)
-	if strings.TrimSpace(sessionToken) == "" {
+	return strings.TrimSpace(sessionToken) != ""
+}
+
+func codexRefreshTokenPresent(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
 		return false
 	}
 	refreshToken, _ := auth.Metadata["refresh_token"].(string)
-	return strings.TrimSpace(refreshToken) == ""
+	return strings.TrimSpace(refreshToken) != ""
 }
 
 func (h *Handler) findAuthByIdentifier(identifier string) *coreauth.Auth {
@@ -952,8 +954,17 @@ func (h *Handler) refreshCodexAuth(ctx context.Context, auth *coreauth.Auth) err
 	if h == nil || h.authManager == nil || auth == nil {
 		return nil
 	}
-	_, err := h.resolveTokenForAuth(ctx, auth)
-	return err
+	updated, errRecover := h.authManager.RecoverCodexTokens(ctx, auth)
+	if updated != nil {
+		auth = updated
+	}
+	if errRecover != nil {
+		return errRecover
+	}
+	if coreauth.CodexRefreshTokenNeedsSupplement(auth) {
+		return &coreauth.Error{Code: "codex_refresh_token_missing", Message: "codex refresh token remains missing after refresh"}
+	}
+	return nil
 }
 
 func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
@@ -1027,7 +1038,7 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 			} else if refreshToken, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(refreshToken) != "" {
 				result["reason"] = "has_refresh_token"
 			} else {
-				result["reason"] = "missing_session_token"
+				result["reason"] = "already_complete"
 			}
 			results = append(results, result)
 			skipped++
@@ -1035,17 +1046,37 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 		}
 		eligible++
 		if err := h.refreshCodexAuth(c.Request.Context(), auth); err != nil {
+			updated := h.findAuthByIdentifier(auth.ID)
+			if updated == nil {
+				updated = auth
+			}
 			result["action"] = "failed"
-			result["reason"] = "refresh_error"
 			result["error"] = err.Error()
+			result["session_token_present"] = codexSessionTokenPresent(updated)
+			result["refresh_token_present"] = codexRefreshTokenPresent(updated)
+
+			reason := "refresh_error"
+			if !codexSessionTokenPresent(updated) {
+				reason = "stage1_session_recovery_failed"
+			} else if authErr, ok := err.(*coreauth.Error); ok && authErr != nil && strings.TrimSpace(authErr.Code) == "codex_refresh_token_missing" {
+				reason = "stage2_refresh_token_recovery_failed"
+			} else {
+				reason = "stage2_refresh_token_recovery_failed"
+			}
+			result["reason"] = reason
+
 			results = append(results, result)
 			failedCount++
 			continue
 		}
 		updated := h.findAuthByIdentifier(auth.ID)
+		if updated == nil {
+			updated = auth
+		}
 		result["action"] = "refreshed"
 		result["reason"] = "missing_refresh_token"
-		result["refresh_token_present"] = updated != nil && updated.Metadata != nil && strings.TrimSpace(fmt.Sprint(updated.Metadata["refresh_token"])) != ""
+		result["session_token_present"] = codexSessionTokenPresent(updated)
+		result["refresh_token_present"] = codexRefreshTokenPresent(updated)
 		results = append(results, result)
 		succeeded++
 	}
