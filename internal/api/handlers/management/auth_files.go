@@ -954,7 +954,7 @@ func (h *Handler) refreshCodexAuth(ctx context.Context, auth *coreauth.Auth) err
 	if h == nil || h.authManager == nil || auth == nil {
 		return nil
 	}
-	updated, errRecover := h.authManager.RecoverCodexTokens(ctx, auth)
+	updated, errRecover := h.authManager.RecoverCodexTokensForced(ctx, auth)
 	if updated != nil {
 		auth = updated
 	}

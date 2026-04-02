@@ -1891,13 +1891,21 @@ func shouldSupplementCodexRefreshToken(auth *Auth) bool {
 }
 
 func (m *Manager) RecoverCodexTokens(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.recoverCodexTokens(ctx, auth, false)
+}
+
+func (m *Manager) RecoverCodexTokensForced(ctx context.Context, auth *Auth) (*Auth, error) {
+	return m.recoverCodexTokens(ctx, auth, true)
+}
+
+func (m *Manager) recoverCodexTokens(ctx context.Context, auth *Auth, force bool) (*Auth, error) {
 	if m == nil || auth == nil {
 		return auth, nil
 	}
 	if !CodexRefreshTokenNeedsSupplement(auth) {
 		return auth, nil
 	}
-	if !auth.NextRefreshAfter.IsZero() && time.Now().Before(auth.NextRefreshAfter) {
+	if !force && !auth.NextRefreshAfter.IsZero() && time.Now().Before(auth.NextRefreshAfter) {
 		if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
 			return updated, nil
 		}
