@@ -326,14 +326,12 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		return token, errToken
 	}
 	if provider == "codex" && h != nil && h.authManager != nil {
-		if exec, ok := h.authManager.Executor(auth.Provider); ok && exec != nil {
-			updated, errRefresh := exec.Refresh(ctx, auth.Clone())
-			if errRefresh == nil && updated != nil {
-				auth = updated
-				_, _ = h.authManager.Update(ctx, updated)
-			} else if errRefresh != nil {
-				return "", errRefresh
-			}
+		updated, errRecover := h.authManager.RecoverCodexTokensForced(ctx, auth)
+		if updated != nil {
+			auth = updated
+		}
+		if errRecover != nil {
+			return "", errRecover
 		}
 	}
 

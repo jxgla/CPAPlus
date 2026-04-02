@@ -889,19 +889,11 @@ func codexRefreshTokenNeedsSupplement(auth *coreauth.Auth) bool {
 }
 
 func codexSessionTokenPresent(auth *coreauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	sessionToken, _ := auth.Metadata["session_token"].(string)
-	return strings.TrimSpace(sessionToken) != ""
+	return coreauth.CodexSessionTokenPresent(auth)
 }
 
 func codexRefreshTokenPresent(auth *coreauth.Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	refreshToken, _ := auth.Metadata["refresh_token"].(string)
-	return strings.TrimSpace(refreshToken) != ""
+	return coreauth.CodexRefreshTokenPresent(auth)
 }
 
 func (h *Handler) findAuthByIdentifier(identifier string) *coreauth.Auth {
@@ -962,7 +954,10 @@ func (h *Handler) refreshCodexAuth(ctx context.Context, auth *coreauth.Auth) err
 		return errRecover
 	}
 	if coreauth.CodexRefreshTokenNeedsSupplement(auth) {
-		return &coreauth.Error{Code: "codex_refresh_token_missing", Message: "codex refresh token remains missing after refresh"}
+		if !coreauth.CodexSessionTokenPresent(auth) {
+			return &coreauth.Error{Code: coreauth.CodexStage1SessionRecoveryFailedCode, Message: "codex session token remains missing after staged recovery"}
+		}
+		return &coreauth.Error{Code: coreauth.CodexRefreshTokenMissingCode, Message: "codex refresh token remains missing after staged recovery"}
 	}
 	return nil
 }
@@ -1033,9 +1028,7 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 		}
 		if onlyMissing && !codexRefreshTokenNeedsSupplement(auth) {
 			result["action"] = "skipped"
-			if auth.Metadata == nil {
-				result["reason"] = "missing_metadata"
-			} else if refreshToken, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(refreshToken) != "" {
+			if codexRefreshTokenPresent(auth) {
 				result["reason"] = "has_refresh_token"
 			} else {
 				result["reason"] = "already_complete"
@@ -1055,13 +1048,16 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 			result["session_token_present"] = codexSessionTokenPresent(updated)
 			result["refresh_token_present"] = codexRefreshTokenPresent(updated)
 
-			reason := "refresh_error"
-			if !codexSessionTokenPresent(updated) {
+			reason := "stage2_refresh_token_recovery_failed"
+			if authErr, ok := err.(*coreauth.Error); ok && authErr != nil {
+				code := strings.TrimSpace(authErr.Code)
+				if code == coreauth.CodexStage1SessionRecoveryFailedCode {
+					reason = "stage1_session_recovery_failed"
+				} else if code == coreauth.CodexRefreshTokenMissingCode {
+					reason = "stage2_refresh_token_recovery_failed"
+				}
+			} else if !codexSessionTokenPresent(updated) {
 				reason = "stage1_session_recovery_failed"
-			} else if authErr, ok := err.(*coreauth.Error); ok && authErr != nil && strings.TrimSpace(authErr.Code) == "codex_refresh_token_missing" {
-				reason = "stage2_refresh_token_recovery_failed"
-			} else {
-				reason = "stage2_refresh_token_recovery_failed"
 			}
 			result["reason"] = reason
 

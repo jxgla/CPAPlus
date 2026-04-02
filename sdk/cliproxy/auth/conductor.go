@@ -1872,6 +1872,27 @@ func shouldForceCodexRefresh(auth *Auth, result Result) bool {
 	return CodexRefreshTokenNeedsSupplement(auth)
 }
 
+const (
+	CodexStage1SessionRecoveryFailedCode = "stage1_session_recovery_failed"
+	CodexRefreshTokenMissingCode         = "codex_refresh_token_missing"
+)
+
+func CodexSessionTokenPresent(auth *Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	sessionToken, _ := auth.Metadata["session_token"].(string)
+	return strings.TrimSpace(sessionToken) != ""
+}
+
+func CodexRefreshTokenPresent(auth *Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+	return strings.TrimSpace(refreshToken) != ""
+}
+
 func CodexRefreshTokenNeedsSupplement(auth *Auth) bool {
 	if auth == nil {
 		return false
@@ -1879,11 +1900,7 @@ func CodexRefreshTokenNeedsSupplement(auth *Auth) bool {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false
 	}
-	if auth.Metadata == nil {
-		return false
-	}
-	refreshToken, _ := auth.Metadata["refresh_token"].(string)
-	return strings.TrimSpace(refreshToken) == ""
+	return !CodexRefreshTokenPresent(auth)
 }
 
 func shouldSupplementCodexRefreshToken(auth *Auth) bool {
@@ -1914,12 +1931,24 @@ func (m *Manager) recoverCodexTokens(ctx context.Context, auth *Auth, force bool
 	m.refreshAuth(ctx, auth.ID)
 	if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
 		if CodexRefreshTokenNeedsSupplement(updated) {
-			return updated, &Error{Code: "codex_refresh_token_missing", Message: "codex refresh token remains missing after refresh"}
+			errorCode := CodexRefreshTokenMissingCode
+			errorMessage := "codex refresh token remains missing after staged recovery"
+			if !CodexSessionTokenPresent(updated) {
+				errorCode = CodexStage1SessionRecoveryFailedCode
+				errorMessage = "codex session token remains missing after staged recovery"
+			}
+			return updated, &Error{Code: errorCode, Message: errorMessage}
 		}
 		return updated, nil
 	}
 	if CodexRefreshTokenNeedsSupplement(auth) {
-		return auth, &Error{Code: "codex_refresh_token_missing", Message: "codex refresh token remains missing after refresh"}
+		errorCode := CodexRefreshTokenMissingCode
+		errorMessage := "codex refresh token remains missing after staged recovery"
+		if !CodexSessionTokenPresent(auth) {
+			errorCode = CodexStage1SessionRecoveryFailedCode
+			errorMessage = "codex session token remains missing after staged recovery"
+		}
+		return auth, &Error{Code: errorCode, Message: errorMessage}
 	}
 	return auth, nil
 }

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -273,6 +274,9 @@ func TestSupplementCodexRefreshTokens_RefreshesEligibleAuths(t *testing.T) {
 		if cloned.Metadata == nil {
 			cloned.Metadata = map[string]any{}
 		}
+		if _, ok := cloned.Metadata["session_token"]; !ok {
+			cloned.Metadata["session_token"] = "fresh-session"
+		}
 		cloned.Metadata["access_token"] = "fresh-access"
 		cloned.Metadata["refresh_token"] = "fresh-refresh"
 		return cloned, nil
@@ -284,6 +288,7 @@ func TestSupplementCodexRefreshTokens_RefreshesEligibleAuths(t *testing.T) {
 		data string
 	}{
 		{filepath.Join(authDir, "eligible.json"), `{"type":"codex","session_token":"session-only"}`},
+		{filepath.Join(authDir, "stage1-recoverable.json"), `{"type":"codex","access_token":"stale-access"}`},
 		{filepath.Join(authDir, "already.json"), `{"type":"codex","session_token":"session","refresh_token":"existing"}`},
 		{filepath.Join(authDir, "other.json"), `{"type":"claude","session_token":"session-only"}`},
 	}
@@ -306,13 +311,13 @@ func TestSupplementCodexRefreshTokens_RefreshesEligibleAuths(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected supplement status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
-	if refreshCalls != 1 {
-		t.Fatalf("expected 1 refresh call, got %d", refreshCalls)
+	if refreshCalls != 2 {
+		t.Fatalf("expected 2 refresh calls, got %d", refreshCalls)
 	}
 
 	var payload struct {
-		Status  string         `json:"status"`
-		Summary map[string]any `json:"summary"`
+		Status  string           `json:"status"`
+		Summary map[string]any   `json:"summary"`
 		Results []map[string]any `json:"results"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -321,15 +326,28 @@ func TestSupplementCodexRefreshTokens_RefreshesEligibleAuths(t *testing.T) {
 	if payload.Status != "ok" {
 		t.Fatalf("status = %q, want ok", payload.Status)
 	}
-	if got := int(payload.Summary["succeeded"].(float64)); got != 1 {
-		t.Fatalf("succeeded = %d, want 1", got)
+	if got := int(payload.Summary["succeeded"].(float64)); got != 2 {
+		t.Fatalf("succeeded = %d, want 2", got)
 	}
 	stored := h.findAuthByIdentifier("eligible.json")
 	if stored == nil {
 		t.Fatal("expected eligible auth")
 	}
+	if got, _ := stored.Metadata["session_token"].(string); got != "session-only" {
+		t.Fatalf("session_token = %q, want session-only", got)
+	}
 	if got, _ := stored.Metadata["refresh_token"].(string); got != "fresh-refresh" {
 		t.Fatalf("refresh_token = %q, want fresh-refresh", got)
+	}
+	stage1Recovered := h.findAuthByIdentifier("stage1-recoverable.json")
+	if stage1Recovered == nil {
+		t.Fatal("expected stage1-recoverable auth")
+	}
+	if got, _ := stage1Recovered.Metadata["session_token"].(string); got != "fresh-session" {
+		t.Fatalf("stage1 session_token = %q, want fresh-session", got)
+	}
+	if got, _ := stage1Recovered.Metadata["refresh_token"].(string); got != "fresh-refresh" {
+		t.Fatalf("stage1 refresh_token = %q, want fresh-refresh", got)
 	}
 }
 
@@ -340,13 +358,23 @@ func TestSupplementCodexRefreshTokens_ReportsStage1SessionRecoveryFailure(t *tes
 	authDir := t.TempDir()
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
-	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, _ *coreauth.Auth) (*coreauth.Auth, error) {
-		return &coreauth.Auth{Metadata: map[string]any{"refresh_token": ""}}, nil
+	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+		cloned := auth.Clone()
+		if cloned.Metadata == nil {
+			cloned.Metadata = map[string]any{}
+		}
+		if auth != nil {
+			if access, _ := auth.Metadata["access_token"].(string); strings.TrimSpace(access) != "" {
+				cloned.Metadata["session_token"] = "recovered-session"
+			}
+		}
+		cloned.Metadata["refresh_token"] = ""
+		return cloned, nil
 	}})
 	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 
 	path := filepath.Join(authDir, "stage1.json")
-	data := `{"type":"codex","access_token":"access-only"}`
+	data := `{"type":"codex"}`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatalf("write auth file: %v", err)
 	}
@@ -438,8 +466,8 @@ func TestSupplementCodexRefreshTokens_ReturnsPartialOnRefreshFailure(t *testing.
 		t.Fatalf("expected supplement status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var payload struct {
-		Status  string         `json:"status"`
-		Summary map[string]any `json:"summary"`
+		Status  string           `json:"status"`
+		Summary map[string]any   `json:"summary"`
 		Results []map[string]any `json:"results"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {

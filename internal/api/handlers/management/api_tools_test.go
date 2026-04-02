@@ -152,6 +152,7 @@ func TestResolveTokenForAuthRefreshesCodexAndPersists(t *testing.T) {
 		}
 		cloned.Metadata["access_token"] = "fresh_access"
 		cloned.Metadata["session_token"] = "fresh_session"
+		cloned.Metadata["refresh_token"] = "fresh_refresh"
 		return cloned, nil
 	}})
 
