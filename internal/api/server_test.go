@@ -245,4 +245,7 @@ func TestServeManagementControlPanel_FallsBackToLocalHTML(t *testing.T) {
 	if !strings.Contains(body, "history.pushState") || !strings.Contains(body, "history.replaceState") {
 		t.Fatalf("expected SPA history hooks for reinjection, got %s", body)
 	}
+	if !strings.Contains(body, "failed_reasons") || !strings.Contains(body, "失败明细(最多5条)") {
+		t.Fatalf("expected supplement failure detail rendering, got %s", body)
+	}
 }

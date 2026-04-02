@@ -275,7 +275,25 @@ const managementSupplementSnippet = `<script>
     if (result) result.textContent = '执行中...';
     try {
       const data = await requestWithKeyRetry('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
-      if (result) result.textContent = '补齐完成：' + JSON.stringify(data.summary || data, null, 2);
+      if (result) {
+        const summary = (data && data.summary) ? data.summary : data;
+        let text = '补齐完成：' + JSON.stringify(summary || {}, null, 2);
+        const reasons = summary && summary.failed_reasons;
+        if (reasons && Object.keys(reasons).length > 0) {
+          const failedDetails = (Array.isArray(data && data.results) ? data.results : [])
+            .filter(item => item && item.action === 'failed')
+            .slice(0, 5)
+            .map(item => ({
+              name: item.name,
+              reason: item.reason,
+              error: item.error,
+              session_token_present: item.session_token_present,
+              refresh_token_present: item.refresh_token_present,
+            }));
+          text += '\n\n失败明细(最多5条)：' + JSON.stringify(failedDetails, null, 2);
+        }
+        result.textContent = text;
+      }
       await refreshSummary();
     } catch (err) {
       if (result) result.textContent = String(err && err.message ? err.message : err);

@@ -407,6 +407,20 @@ func TestSupplementCodexRefreshTokens_ReportsStage1SessionRecoveryFailure(t *tes
 	if got := int(payload.Summary["failed"].(float64)); got != 1 {
 		t.Fatalf("failed = %d, want 1", got)
 	}
+	failedReasons, ok := payload.Summary["failed_reasons"].(map[string]any)
+	if !ok {
+		t.Fatalf("failed_reasons type = %T, want map[string]any", payload.Summary["failed_reasons"])
+	}
+	if got := int(failedReasons["stage1_session_recovery_failed"].(float64)); got != 1 {
+		t.Fatalf("failed_reasons[stage1_session_recovery_failed] = %d, want 1", got)
+	}
+	failedSamples, ok := payload.Summary["failed_samples"].(map[string]any)
+	if !ok {
+		t.Fatalf("failed_samples type = %T, want map[string]any", payload.Summary["failed_samples"])
+	}
+	if got, _ := failedSamples["stage1_session_recovery_failed"].(string); got != "stage1.json" {
+		t.Fatalf("failed_samples[stage1_session_recovery_failed] = %q, want stage1.json", got)
+	}
 	if len(payload.Results) != 1 {
 		t.Fatalf("results length = %d, want 1", len(payload.Results))
 	}
@@ -479,13 +493,27 @@ func TestSupplementCodexRefreshTokens_ReturnsPartialOnRefreshFailure(t *testing.
 	if got := int(payload.Summary["failed"].(float64)); got != 1 {
 		t.Fatalf("failed = %d, want 1", got)
 	}
-	failedReasons := map[string]string{}
+	failedReasons, ok := payload.Summary["failed_reasons"].(map[string]any)
+	if !ok {
+		t.Fatalf("failed_reasons type = %T, want map[string]any", payload.Summary["failed_reasons"])
+	}
+	if got := int(failedReasons["stage2_refresh_token_recovery_failed"].(float64)); got != 1 {
+		t.Fatalf("failed_reasons[stage2_refresh_token_recovery_failed] = %d, want 1", got)
+	}
+	failedSamples, ok := payload.Summary["failed_samples"].(map[string]any)
+	if !ok {
+		t.Fatalf("failed_samples type = %T, want map[string]any", payload.Summary["failed_samples"])
+	}
+	if got, _ := failedSamples["stage2_refresh_token_recovery_failed"].(string); got != "bad.json" {
+		t.Fatalf("failed_samples[stage2_refresh_token_recovery_failed] = %q, want bad.json", got)
+	}
+	failedReasonsByName := map[string]string{}
 	for _, item := range payload.Results {
 		name, _ := item["name"].(string)
 		reason, _ := item["reason"].(string)
-		failedReasons[name] = reason
+		failedReasonsByName[name] = reason
 	}
-	if failedReasons["bad.json"] != "stage2_refresh_token_recovery_failed" {
-		t.Fatalf("bad.json reason = %q, want stage2_refresh_token_recovery_failed", failedReasons["bad.json"])
+	if failedReasonsByName["bad.json"] != "stage2_refresh_token_recovery_failed" {
+		t.Fatalf("bad.json reason = %q, want stage2_refresh_token_recovery_failed", failedReasonsByName["bad.json"])
 	}
 }

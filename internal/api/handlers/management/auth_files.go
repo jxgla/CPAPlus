@@ -1005,6 +1005,8 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 	succeeded := 0
 	failedCount := 0
 	skipped := 0
+	failureReasons := map[string]int{}
+	failureSamples := map[string]string{}
 
 	for _, auth := range auths {
 		if auth == nil {
@@ -1060,6 +1062,12 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 				reason = "stage1_session_recovery_failed"
 			}
 			result["reason"] = reason
+			failureReasons[reason]++
+			if _, exists := failureSamples[reason]; !exists {
+				if name, ok := result["name"].(string); ok {
+					failureSamples[reason] = name
+				}
+			}
 
 			results = append(results, result)
 			failedCount++
@@ -1081,16 +1089,21 @@ func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
 	if failedCount > 0 {
 		status = "partial"
 	}
+	summary := gin.H{
+		"matched":   matched,
+		"eligible":  eligible,
+		"attempted": eligible,
+		"succeeded": succeeded,
+		"failed":    failedCount,
+		"skipped":   skipped,
+	}
+	if failedCount > 0 {
+		summary["failed_reasons"] = failureReasons
+		summary["failed_samples"] = failureSamples
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"status": status,
-		"summary": gin.H{
-			"matched":   matched,
-			"eligible":  eligible,
-			"attempted": eligible,
-			"succeeded": succeeded,
-			"failed":    failedCount,
-			"skipped":   skipped,
-		},
+		"status":  status,
+		"summary": summary,
 		"results": results,
 	})
 }
