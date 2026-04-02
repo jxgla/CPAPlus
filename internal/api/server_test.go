@@ -233,10 +233,13 @@ func TestServeManagementControlPanel_FallsBackToLocalHTML(t *testing.T) {
 		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Codex refresh_token 补齐") {
-		t.Fatalf("expected fallback management html, got %s", body)
+	if !strings.Contains(body, "补齐RT") {
+		t.Fatalf("expected injected supplement button, got %s", body)
+	}
+	if !strings.Contains(body, "cpa_management_key") {
+		t.Fatalf("expected management key storage hook, got %s", body)
 	}
 	if !strings.Contains(body, "/v0/management/auth-files/codex-refresh-token/supplement") {
-		t.Fatalf("expected supplement endpoint in fallback html, got %s", body)
+		t.Fatalf("expected supplement endpoint in injected html, got %s", body)
 	}
 }

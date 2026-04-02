@@ -147,45 +147,135 @@ const localManagementHTML = `<!doctype html>
 </body>
 </html>`
 
-const managementSupplementSnippet = `<div id="cpa-codex-refresh-supplement" style="position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:360px;background:#111827;color:#f9fafb;padding:16px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);font-family:system-ui,sans-serif;">
-  <div style="font-size:16px;font-weight:600;margin-bottom:8px;">Codex refresh_token 补齐</div>
-  <div id="cpa-codex-refresh-summary" style="font-size:13px;opacity:.85;margin-bottom:10px;">加载中...</div>
-  <button id="cpa-codex-refresh-btn" style="border:0;border-radius:8px;padding:10px 12px;background:#2563eb;color:#fff;cursor:pointer;">补齐 Codex refresh_token</button>
-  <pre id="cpa-codex-refresh-result" style="margin-top:10px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#1f2937;padding:10px;border-radius:8px;">暂无结果</pre>
-</div>
-<script>
+const managementSupplementSnippet = `<script>
 (function(){
   if (window.__CPA_CODEX_REFRESH_SUPPLEMENT__) return;
   window.__CPA_CODEX_REFRESH_SUPPLEMENT__ = true;
+
+  const STORAGE_KEY = 'cpa_management_key';
+
+  function getManagementKey() {
+    try { return (localStorage.getItem(STORAGE_KEY) || '').trim(); } catch { return ''; }
+  }
+
+  function setManagementKey(value) {
+    try {
+      if ((value || '').trim()) localStorage.setItem(STORAGE_KEY, value.trim());
+      else localStorage.removeItem(STORAGE_KEY);
+    } catch {}
+  }
+
+  function buildHeaders(extra) {
+    const headers = Object.assign({'Content-Type':'application/json'}, extra || {});
+    const key = getManagementKey();
+    if (key) headers['Authorization'] = 'Bearer ' + key;
+    return headers;
+  }
+
   async function request(path, options) {
-    const headers = Object.assign({'Content-Type':'application/json'}, (options && options.headers) || {});
-    const response = await fetch(path, Object.assign({}, options || {}, { headers }));
+    const response = await fetch(path, Object.assign({}, options || {}, { headers: buildHeaders((options && options.headers) || {}) }));
     const text = await response.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-    if (!response.ok) throw new Error(data.error || data.message || text || ('HTTP ' + response.status));
+    if (!response.ok) {
+      const msg = data.error || data.message || text || ('HTTP ' + response.status);
+      const err = new Error(msg);
+      err.status = response.status;
+      throw err;
+    }
     return data;
   }
-  async function refreshSummary() {
-    const summary = document.getElementById('cpa-codex-refresh-summary');
-    if (!summary) return;
+
+  async function requestWithKeyRetry(path, options) {
     try {
-      const data = await request('/v0/management/auth-files');
-      const files = Array.isArray(data.files) ? data.files : [];
-      const missing = files.filter(file => file && file.codex_refresh_token_missing).length;
-      summary.textContent = missing > 0 ? ('当前待补齐: ' + missing) : '当前没有缺失 refresh_token 的 Codex auth';
+      return await request(path, options);
     } catch (err) {
-      summary.textContent = String(err && err.message ? err.message : err);
+      const msg = String(err && err.message ? err.message : err || '');
+      if (msg.includes('missing management key') || msg.includes('invalid management key')) {
+        const input = window.prompt('请输入 management key', getManagementKey());
+        if (input === null) throw err;
+        setManagementKey(input);
+        return await request(path, options);
+      }
+      throw err;
     }
   }
+
+  function ensureStyles() {
+    if (document.getElementById('cpa-codex-refresh-style')) return;
+    const style = document.createElement('style');
+    style.id = 'cpa-codex-refresh-style';
+    style.textContent = '.cpa-inline-rt-btn{border:0;border-radius:8px;padding:8px 12px;background:#2563eb;color:#fff;cursor:pointer;white-space:nowrap;}.cpa-inline-rt-btn[disabled]{opacity:.6;cursor:not-allowed;}.cpa-inline-rt-note{margin-left:8px;font-size:12px;color:#6b7280;}.cpa-inline-rt-result{margin-top:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;color:#374151;}';
+    document.head.appendChild(style);
+  }
+
+  function findToolbarAnchor() {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const refreshBtn = buttons.find(btn => /刷新/.test((btn.textContent || '').trim()));
+    const uploadBtn = buttons.find(btn => /上传文件/.test((btn.textContent || '').trim()));
+    const deleteAllBtn = buttons.find(btn => /删除全部/.test((btn.textContent || '').trim()));
+    if (refreshBtn && uploadBtn && deleteAllBtn) {
+      return { refreshBtn, uploadBtn, deleteAllBtn, parent: refreshBtn.parentElement };
+    }
+    return null;
+  }
+
+  function ensureInlineUI() {
+    ensureStyles();
+    if (document.getElementById('cpa-inline-rt-btn')) return true;
+    const anchor = findToolbarAnchor();
+    if (!anchor || !anchor.parent) return false;
+
+    const wrap = document.createElement('div');
+    wrap.id = 'cpa-inline-rt-wrap';
+    wrap.style.display = 'inline-flex';
+    wrap.style.alignItems = 'center';
+    wrap.style.gap = '8px';
+    wrap.style.marginRight = '8px';
+
+    const btn = document.createElement('button');
+    btn.id = 'cpa-inline-rt-btn';
+    btn.className = 'cpa-inline-rt-btn';
+    btn.textContent = '补齐RT';
+
+    const note = document.createElement('span');
+    note.id = 'cpa-inline-rt-note';
+    note.className = 'cpa-inline-rt-note';
+    note.textContent = '加载中...';
+
+    wrap.appendChild(btn);
+    wrap.appendChild(note);
+
+    anchor.parent.insertBefore(wrap, anchor.refreshBtn);
+
+    const result = document.createElement('div');
+    result.id = 'cpa-inline-rt-result';
+    result.className = 'cpa-inline-rt-result';
+    anchor.parent.parentElement && anchor.parent.parentElement.appendChild(result);
+    return true;
+  }
+
+  async function refreshSummary() {
+    const note = document.getElementById('cpa-inline-rt-note');
+    if (!note) return;
+    try {
+      const data = await requestWithKeyRetry('/v0/management/auth-files');
+      const files = Array.isArray(data.files) ? data.files : [];
+      const missing = files.filter(file => file && file.codex_refresh_token_missing).length;
+      note.textContent = missing > 0 ? ('待补齐: ' + missing) : '无需补齐';
+    } catch (err) {
+      note.textContent = String(err && err.message ? err.message : err);
+    }
+  }
+
   async function supplement() {
-    const btn = document.getElementById('cpa-codex-refresh-btn');
-    const result = document.getElementById('cpa-codex-refresh-result');
+    const btn = document.getElementById('cpa-inline-rt-btn');
+    const result = document.getElementById('cpa-inline-rt-result');
     if (btn) btn.disabled = true;
     if (result) result.textContent = '执行中...';
     try {
-      const data = await request('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
-      if (result) result.textContent = JSON.stringify(data, null, 2);
+      const data = await requestWithKeyRetry('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
+      if (result) result.textContent = '补齐完成：' + JSON.stringify(data.summary || data, null, 2);
       await refreshSummary();
     } catch (err) {
       if (result) result.textContent = String(err && err.message ? err.message : err);
@@ -193,15 +283,25 @@ const managementSupplementSnippet = `<div id="cpa-codex-refresh-supplement" styl
       if (btn) btn.disabled = false;
     }
   }
+
   document.addEventListener('click', function(event){
-    if (event && event.target && event.target.id === 'cpa-codex-refresh-btn') {
+    if (event && event.target && event.target.id === 'cpa-inline-rt-btn') {
       supplement();
     }
   });
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', refreshSummary, { once: true });
-  } else {
+
+  function boot() {
+    if (!ensureInlineUI()) return false;
     refreshSummary();
+    return true;
+  }
+
+  if (!boot()) {
+    let retries = 0;
+    const timer = setInterval(function(){
+      retries += 1;
+      if (boot() || retries >= 60) clearInterval(timer);
+    }, 1000);
   }
 })();
 </script>`
