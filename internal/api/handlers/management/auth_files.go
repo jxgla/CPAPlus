@@ -374,6 +374,7 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	auth.EnsureIndex()
 	runtimeOnly := isRuntimeOnlyAuth(auth)
+	codexRefreshTokenMissing := codexRefreshTokenNeedsSupplement(auth)
 	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
 		return nil
 	}
@@ -386,19 +387,20 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		name = auth.ID
 	}
 	entry := gin.H{
-		"id":             auth.ID,
-		"auth_index":     auth.Index,
-		"name":           name,
-		"type":           strings.TrimSpace(auth.Provider),
-		"provider":       strings.TrimSpace(auth.Provider),
-		"label":          auth.Label,
-		"status":         auth.Status,
-		"status_message": auth.StatusMessage,
-		"disabled":       auth.Disabled,
-		"unavailable":    auth.Unavailable,
-		"runtime_only":   runtimeOnly,
-		"source":         "memory",
-		"size":           int64(0),
+		"id":                          auth.ID,
+		"auth_index":                  auth.Index,
+		"name":                        name,
+		"type":                        strings.TrimSpace(auth.Provider),
+		"provider":                    strings.TrimSpace(auth.Provider),
+		"label":                       auth.Label,
+		"status":                      auth.Status,
+		"status_message":              auth.StatusMessage,
+		"disabled":                    auth.Disabled,
+		"unavailable":                 auth.Unavailable,
+		"runtime_only":                runtimeOnly,
+		"codex_refresh_token_missing": codexRefreshTokenMissing,
+		"source":                      "memory",
+		"size":                        int64(0),
 	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
@@ -825,7 +827,7 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 	if c == nil {
 		return nil, nil
 	}
-	names := uniqueAuthFileNames(c.QueryArray("name"))
+	names := uniqueAuthIdentifiers(c.QueryArray("name"))
 	if len(names) > 0 {
 		return names, nil
 	}
@@ -848,7 +850,7 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 		if err := json.Unmarshal(body, &arrayBody); err != nil {
 			return nil, fmt.Errorf("invalid request body")
 		}
-		return uniqueAuthFileNames(arrayBody), nil
+		return uniqueAuthIdentifiers(arrayBody), nil
 	}
 	if err := json.Unmarshal(body, &objectBody); err != nil {
 		return nil, fmt.Errorf("invalid request body")
@@ -859,10 +861,10 @@ func requestedAuthFileNamesForDelete(c *gin.Context) ([]string, error) {
 		out = append(out, objectBody.Name)
 	}
 	out = append(out, objectBody.Names...)
-	return uniqueAuthFileNames(out), nil
+	return uniqueAuthIdentifiers(out), nil
 }
 
-func uniqueAuthFileNames(names []string) []string {
+func uniqueAuthIdentifiers(names []string) []string {
 	if len(names) == 0 {
 		return nil
 	}
@@ -880,6 +882,190 @@ func uniqueAuthFileNames(names []string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+func codexRefreshTokenNeedsSupplement(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	sessionToken, _ := auth.Metadata["session_token"].(string)
+	if strings.TrimSpace(sessionToken) == "" {
+		return false
+	}
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+	return strings.TrimSpace(refreshToken) == ""
+}
+
+func (h *Handler) findAuthByIdentifier(identifier string) *coreauth.Auth {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	identifier = strings.TrimSpace(identifier)
+	if identifier == "" {
+		return nil
+	}
+	if auth, ok := h.authManager.GetByID(identifier); ok {
+		return auth
+	}
+	auths := h.authManager.List()
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		if strings.TrimSpace(auth.Index) == identifier || strings.TrimSpace(auth.FileName) == identifier {
+			return auth
+		}
+	}
+	return nil
+}
+
+func (h *Handler) matchingAuthByIdentifiers(identifiers []string) []*coreauth.Auth {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	if len(identifiers) == 0 {
+		return h.authManager.List()
+	}
+	out := make([]*coreauth.Auth, 0, len(identifiers))
+	seen := make(map[string]struct{}, len(identifiers))
+	for _, identifier := range identifiers {
+		auth := h.findAuthByIdentifier(identifier)
+		if auth == nil {
+			continue
+		}
+		if _, ok := seen[auth.ID]; ok {
+			continue
+		}
+		seen[auth.ID] = struct{}{}
+		out = append(out, auth)
+	}
+	return out
+}
+
+func (h *Handler) refreshCodexAuth(ctx context.Context, auth *coreauth.Auth) error {
+	if h == nil || h.authManager == nil || auth == nil {
+		return nil
+	}
+	_, err := h.resolveTokenForAuth(ctx, auth)
+	return err
+}
+
+func (h *Handler) SupplementCodexRefreshTokens(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name        string   `json:"name"`
+		Names       []string `json:"names"`
+		AuthIndex   string   `json:"auth_index"`
+		AuthIndexes []string `json:"auth_indexes"`
+		OnlyMissing *bool    `json:"only_missing"`
+	}
+	if c.Request != nil && c.Request.Body != nil {
+		if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+			return
+		}
+	}
+
+	identifiers := make([]string, 0, len(req.Names)+len(req.AuthIndexes)+2)
+	if trimmed := strings.TrimSpace(req.Name); trimmed != "" {
+		identifiers = append(identifiers, trimmed)
+	}
+	identifiers = append(identifiers, req.Names...)
+	if trimmed := strings.TrimSpace(req.AuthIndex); trimmed != "" {
+		identifiers = append(identifiers, trimmed)
+	}
+	identifiers = append(identifiers, req.AuthIndexes...)
+	identifiers = uniqueAuthIdentifiers(identifiers)
+
+	onlyMissing := true
+	if req.OnlyMissing != nil {
+		onlyMissing = *req.OnlyMissing
+	}
+
+	auths := h.matchingAuthByIdentifiers(identifiers)
+	results := make([]gin.H, 0, len(auths))
+	matched := len(auths)
+	eligible := 0
+	succeeded := 0
+	failedCount := 0
+	skipped := 0
+
+	for _, auth := range auths {
+		if auth == nil {
+			continue
+		}
+		result := gin.H{
+			"id":         auth.ID,
+			"auth_index": auth.EnsureIndex(),
+			"name":       strings.TrimSpace(auth.FileName),
+			"provider":   strings.TrimSpace(auth.Provider),
+		}
+		if result["name"] == "" {
+			result["name"] = auth.ID
+		}
+		if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			result["action"] = "skipped"
+			result["reason"] = "non_codex"
+			results = append(results, result)
+			skipped++
+			continue
+		}
+		if onlyMissing && !codexRefreshTokenNeedsSupplement(auth) {
+			result["action"] = "skipped"
+			if auth.Metadata == nil {
+				result["reason"] = "missing_metadata"
+			} else if refreshToken, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(refreshToken) != "" {
+				result["reason"] = "has_refresh_token"
+			} else {
+				result["reason"] = "missing_session_token"
+			}
+			results = append(results, result)
+			skipped++
+			continue
+		}
+		eligible++
+		if err := h.refreshCodexAuth(c.Request.Context(), auth); err != nil {
+			result["action"] = "failed"
+			result["reason"] = "refresh_error"
+			result["error"] = err.Error()
+			results = append(results, result)
+			failedCount++
+			continue
+		}
+		updated := h.findAuthByIdentifier(auth.ID)
+		result["action"] = "refreshed"
+		result["reason"] = "missing_refresh_token"
+		result["refresh_token_present"] = updated != nil && updated.Metadata != nil && strings.TrimSpace(fmt.Sprint(updated.Metadata["refresh_token"])) != ""
+		results = append(results, result)
+		succeeded++
+	}
+
+	status := "ok"
+	if failedCount > 0 {
+		status = "partial"
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": status,
+		"summary": gin.H{
+			"matched":   matched,
+			"eligible":  eligible,
+			"attempted": eligible,
+			"succeeded": succeeded,
+			"failed":    failedCount,
+			"skipped":   skipped,
+		},
+		"results": results,
+	})
 }
 
 func (h *Handler) deleteAuthFileByName(ctx context.Context, name string) (string, int, error) {

@@ -34,6 +34,23 @@ const (
 
 var dataTag = []byte("data:")
 
+type codexUnauthorizedRetryKey struct{}
+
+func codexUnauthorizedRetried(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(codexUnauthorizedRetryKey{}).(bool)
+	return v
+}
+
+func codexMarkUnauthorizedRetried(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, codexUnauthorizedRetryKey{}, true)
+}
+
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {

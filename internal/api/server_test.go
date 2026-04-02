@@ -208,3 +208,35 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestServeManagementControlPanel_FallsBackToLocalHTML(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "test-secret")
+	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+
+	server := newTestServer(t)
+	server.cfg.RemoteManagement.SecretKey = "test-secret"
+	server.cfg.RemoteManagement.AllowRemote = true
+	server.cfg.RemoteManagement.DisableControlPanel = false
+	server.managementRoutesEnabled.Store(true)
+	server.registerManagementRoutes()
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	req.Header.Set("Authorization", "Bearer test-secret")
+	rr := httptest.NewRecorder()
+
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Codex refresh_token 补齐") {
+		t.Fatalf("expected fallback management html, got %s", body)
+	}
+	if !strings.Contains(body, "/v0/management/auth-files/codex-refresh-token/supplement") {
+		t.Fatalf("expected supplement endpoint in fallback html, got %s", body)
+	}
+}

@@ -408,7 +408,246 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 }
 
-func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
+type codexForceRefreshExecutor struct {
+	mu sync.Mutex
+
+	executeErr      error
+	countErr        error
+	refreshCalls    int
+	refreshedTokens []string
+}
+
+func (e *codexForceRefreshExecutor) Identifier() string {
+	return "codex"
+}
+
+func (e *codexForceRefreshExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	err := e.executeErr
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte("ok")}, nil
+}
+
+func (e *codexForceRefreshExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not implemented"}
+}
+
+func (e *codexForceRefreshExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.refreshCalls++
+	updated := auth.Clone()
+	if updated.Metadata == nil {
+		updated.Metadata = map[string]any{}
+	}
+	newToken := "forced-refresh-token"
+	updated.Metadata["refresh_token"] = newToken
+	e.refreshedTokens = append(e.refreshedTokens, newToken)
+	return updated, nil
+}
+
+func (e *codexForceRefreshExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.mu.Lock()
+	err := e.countErr
+	e.mu.Unlock()
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
+	return cliproxyexecutor.Response{Payload: []byte("count-ok")}, nil
+}
+
+func (e *codexForceRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (e *codexForceRefreshExecutor) RefreshCalls() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.refreshCalls
+}
+
+func TestManager_Execute_CodexUnauthorizedForcesRefresh(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &codexForceRefreshExecutor{executeErr: &Error{HTTPStatus: http.StatusUnauthorized, Message: "unauthorized"}}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "codex-unauthorized-refresh",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"session_token": "session-value",
+			"refresh_token": "existing-refresh",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "codex-test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "codex-test-model"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected execute error")
+	}
+
+	if calls := executor.RefreshCalls(); calls != 1 {
+		t.Fatalf("expected refresh to be called once, got %d", calls)
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist")
+	}
+	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
+	if gotRefresh != "forced-refresh-token" {
+		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	}
+}
+
+func TestManager_Execute_CodexQuotaWithMissingRefreshTokenForcesRefresh(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &codexForceRefreshExecutor{executeErr: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "codex-quota-refresh-backfill",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"session_token": "session-value",
+			"refresh_token": "",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "codex-test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "codex-test-model"}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected execute error")
+	}
+
+	if calls := executor.RefreshCalls(); calls != 1 {
+		t.Fatalf("expected refresh to be called once, got %d", calls)
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist")
+	}
+	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
+	if gotRefresh != "forced-refresh-token" {
+		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	}
+}
+
+func TestManager_Execute_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &codexForceRefreshExecutor{}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "codex-prefill-refresh",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"session_token": "session-value",
+			"refresh_token": "",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "codex-test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "codex-test-model"}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error: %v", errExecute)
+	}
+	if string(resp.Payload) != "ok" {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), "ok")
+	}
+
+	if calls := executor.RefreshCalls(); calls != 1 {
+		t.Fatalf("expected refresh to be called once, got %d", calls)
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist")
+	}
+	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
+	if gotRefresh != "forced-refresh-token" {
+		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	}
+}
+
+func TestManager_ExecuteCount_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	executor := &codexForceRefreshExecutor{}
+	m.RegisterExecutor(executor)
+
+	auth := &Auth{
+		ID:       "codex-count-prefill-refresh",
+		Provider: "codex",
+		Metadata: map[string]any{
+			"session_token": "session-value",
+			"refresh_token": "",
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "codex-test-model"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	resp, errCount := m.ExecuteCount(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "codex-test-model"}, cliproxyexecutor.Options{})
+	if errCount != nil {
+		t.Fatalf("execute count error: %v", errCount)
+	}
+	if string(resp.Payload) != "count-ok" {
+		t.Fatalf("count payload = %q, want %q", string(resp.Payload), "count-ok")
+	}
+
+	if calls := executor.RefreshCalls(); calls != 1 {
+		t.Fatalf("expected refresh to be called once, got %d", calls)
+	}
+
+	updated, ok := m.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to exist")
+	}
+	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
+	if gotRefresh != "forced-refresh-token" {
+		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	}
+}
+
+func TestManager_MarkResult_DisableCoolingOverrideSkipsCooldown(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })

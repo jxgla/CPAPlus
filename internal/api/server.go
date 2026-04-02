@@ -43,6 +43,179 @@ import (
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
+const localManagementHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CPA Management</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; color: #111827; background: #f9fafb; }
+    h1, h2 { margin-bottom: 12px; }
+    .panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    button { border: 0; border-radius: 8px; padding: 10px 14px; background: #2563eb; color: #fff; cursor: pointer; }
+    button[disabled] { opacity: .6; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
+    .muted { color: #6b7280; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
+    .pill.warn { background: #fef3c7; color: #92400e; }
+    .pill.ok { background: #dcfce7; color: #166534; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #f9fafb; padding: 12px; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <h1>CPA Management</h1>
+  <div class="panel">
+    <h2>Codex refresh_token 补齐</h2>
+    <p class="muted">对缺少 refresh_token 但仍有 session_token 的 Codex auth 手动执行一次补齐，并写回文件。</p>
+    <button id="supplement-btn">补齐 Codex refresh_token</button>
+    <span id="summary" class="muted" style="margin-left:12px"></span>
+  </div>
+  <div class="panel">
+    <h2>Auth Files</h2>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Provider</th><th>Email</th><th>Status</th><th>refresh_token</th></tr>
+      </thead>
+      <tbody id="auth-rows">
+        <tr><td colspan="5" class="muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="panel">
+    <h2>最近结果</h2>
+    <pre id="result">暂无结果</pre>
+  </div>
+  <script>
+    async function request(path, options) {
+      const res = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, options || {}));
+      const text = await res.text();
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+      if (!res.ok) throw new Error(data.error || data.message || text || ('HTTP ' + res.status));
+      return data;
+    }
+
+    function renderRows(files) {
+      const tbody = document.getElementById('auth-rows');
+      if (!Array.isArray(files) || files.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="muted">No auth files</td></tr>';
+        return;
+      }
+      tbody.innerHTML = files.map(file => {
+        const missing = !!file.codex_refresh_token_missing;
+        const badge = missing ? '<span class="pill warn">missing</span>' : '<span class="pill ok">ok</span>';
+        return '<tr>' +
+          '<td>' + (file.name || '') + '</td>' +
+          '<td>' + (file.provider || file.type || '') + '</td>' +
+          '<td>' + (file.email || '') + '</td>' +
+          '<td>' + (file.status || '') + '</td>' +
+          '<td>' + badge + '</td>' +
+        '</tr>';
+      }).join('');
+    }
+
+    async function loadAuthFiles() {
+      const data = await request('/v0/management/auth-files');
+      renderRows(data.files || []);
+      const missing = (data.files || []).filter(x => x && x.codex_refresh_token_missing).length;
+      document.getElementById('summary').textContent = missing > 0 ? ('当前待补齐: ' + missing) : '当前没有缺失 refresh_token 的 Codex auth';
+    }
+
+    async function supplement() {
+      const button = document.getElementById('supplement-btn');
+      const result = document.getElementById('result');
+      button.disabled = true;
+      result.textContent = '执行中...';
+      try {
+        const data = await request('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
+        result.textContent = JSON.stringify(data, null, 2);
+        await loadAuthFiles();
+      } catch (err) {
+        result.textContent = String(err && err.message ? err.message : err);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    document.getElementById('supplement-btn').addEventListener('click', supplement);
+    loadAuthFiles().catch(err => {
+      document.getElementById('result').textContent = String(err && err.message ? err.message : err);
+    });
+  </script>
+</body>
+</html>`
+
+const managementSupplementSnippet = `<div id="cpa-codex-refresh-supplement" style="position:fixed;right:16px;bottom:16px;z-index:2147483647;max-width:360px;background:#111827;color:#f9fafb;padding:16px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);font-family:system-ui,sans-serif;">
+  <div style="font-size:16px;font-weight:600;margin-bottom:8px;">Codex refresh_token 补齐</div>
+  <div id="cpa-codex-refresh-summary" style="font-size:13px;opacity:.85;margin-bottom:10px;">加载中...</div>
+  <button id="cpa-codex-refresh-btn" style="border:0;border-radius:8px;padding:10px 12px;background:#2563eb;color:#fff;cursor:pointer;">补齐 Codex refresh_token</button>
+  <pre id="cpa-codex-refresh-result" style="margin-top:10px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#1f2937;padding:10px;border-radius:8px;">暂无结果</pre>
+</div>
+<script>
+(function(){
+  if (window.__CPA_CODEX_REFRESH_SUPPLEMENT__) return;
+  window.__CPA_CODEX_REFRESH_SUPPLEMENT__ = true;
+  async function request(path, options) {
+    const headers = Object.assign({'Content-Type':'application/json'}, (options && options.headers) || {});
+    const response = await fetch(path, Object.assign({}, options || {}, { headers }));
+    const text = await response.text();
+    let data = {};
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!response.ok) throw new Error(data.error || data.message || text || ('HTTP ' + response.status));
+    return data;
+  }
+  async function refreshSummary() {
+    const summary = document.getElementById('cpa-codex-refresh-summary');
+    if (!summary) return;
+    try {
+      const data = await request('/v0/management/auth-files');
+      const files = Array.isArray(data.files) ? data.files : [];
+      const missing = files.filter(file => file && file.codex_refresh_token_missing).length;
+      summary.textContent = missing > 0 ? ('当前待补齐: ' + missing) : '当前没有缺失 refresh_token 的 Codex auth';
+    } catch (err) {
+      summary.textContent = String(err && err.message ? err.message : err);
+    }
+  }
+  async function supplement() {
+    const btn = document.getElementById('cpa-codex-refresh-btn');
+    const result = document.getElementById('cpa-codex-refresh-result');
+    if (btn) btn.disabled = true;
+    if (result) result.textContent = '执行中...';
+    try {
+      const data = await request('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
+      if (result) result.textContent = JSON.stringify(data, null, 2);
+      await refreshSummary();
+    } catch (err) {
+      if (result) result.textContent = String(err && err.message ? err.message : err);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+  }
+  document.addEventListener('click', function(event){
+    if (event && event.target && event.target.id === 'cpa-codex-refresh-btn') {
+      supplement();
+    }
+  });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', refreshSummary, { once: true });
+  } else {
+    refreshSummary();
+  }
+})();
+</script>`
+
+func injectManagementSupplementHTML(body string) string {
+	if strings.Contains(body, "/v0/management/auth-files/codex-refresh-token/supplement") {
+		return body
+	}
+	if strings.Contains(strings.ToLower(body), "</body>") {
+		return strings.Replace(body, "</body>", managementSupplementSnippet+"</body>", 1)
+	}
+	return body + managementSupplementSnippet
+}
+
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
 	engineConfigurator   func(*gin.Engine)
@@ -663,9 +836,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
-		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
-		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
-		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
+			mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
+			mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
+			mgmt.POST("/auth-files/codex-refresh-token/supplement", s.mgmt.SupplementCodexRefreshTokens)
+			mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
@@ -707,7 +881,8 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 	}
 	filePath := managementasset.FilePath(s.configFilePath)
 	if strings.TrimSpace(filePath) == "" {
-		c.AbortWithStatus(http.StatusNotFound)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, localManagementHTML)
 		return
 	}
 
@@ -716,7 +891,8 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 			// Synchronously ensure management.html is available with a detached context.
 			// Control panel bootstrap should not be canceled by client disconnects.
 			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
+				c.Header("Content-Type", "text/html; charset=utf-8")
+				c.String(http.StatusOK, localManagementHTML)
 				return
 			}
 		} else {
@@ -726,7 +902,15 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
-	c.File(filePath)
+	data, errRead := os.ReadFile(filePath)
+	if errRead != nil {
+		log.WithError(errRead).Warn("failed to read management control panel asset, serving local fallback")
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.String(http.StatusOK, localManagementHTML)
+		return
+	}
+	c.Header("Content-Type", "text/html; charset=utf-8")
+	c.String(http.StatusOK, injectManagementSupplementHTML(string(data)))
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

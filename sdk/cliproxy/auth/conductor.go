@@ -1100,6 +1100,10 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
+		auth = m.supplementCodexRefreshToken(execCtx, auth)
+		if auth == nil {
+			continue
+		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1178,6 +1182,10 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
+		auth = m.supplementCodexRefreshToken(execCtx, auth)
+		if auth == nil {
+			continue
+		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1262,6 +1270,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		if rt := m.roundTripperFor(auth); rt != nil {
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
+		}
+
+		auth = m.supplementCodexRefreshToken(execCtx, auth)
+		if auth == nil {
+			continue
 		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1710,6 +1723,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	shouldForceRefresh := false
 	var authSnapshot *Auth
 
 	m.mu.Lock()
@@ -1810,12 +1824,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 
+		if shouldForceCodexRefresh(auth, result) {
+			shouldForceRefresh = true
+		}
+
 		_ = m.persist(ctx, auth)
 		authSnapshot = auth.Clone()
 	}
 	m.mu.Unlock()
 	if m.scheduler != nil && authSnapshot != nil {
 		m.scheduler.upsertAuth(authSnapshot)
+	}
+
+	if shouldForceRefresh && authSnapshot != nil {
+		m.forceRefresh(ctx, authSnapshot)
 	}
 
 	if clearModelQuota && result.Model != "" {
@@ -1831,6 +1853,82 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 
 	m.hook.OnResult(ctx, result)
+}
+
+func shouldForceCodexRefresh(auth *Auth, result Result) bool {
+	if auth == nil || result.Success {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	status := statusCodeFromResult(result.Error)
+	if status != http.StatusUnauthorized && status != http.StatusTooManyRequests {
+		return false
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	hasSession := false
+	if v, ok := auth.Metadata["session_token"].(string); ok {
+		hasSession = strings.TrimSpace(v) != ""
+	}
+	if !hasSession {
+		return false
+	}
+	refreshToken := ""
+	if v, ok := auth.Metadata["refresh_token"].(string); ok {
+		refreshToken = strings.TrimSpace(v)
+	}
+	if refreshToken == "" {
+		return true
+	}
+	if status == http.StatusUnauthorized {
+		return true
+	}
+	return false
+}
+
+func shouldSupplementCodexRefreshToken(auth *Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return false
+	}
+	if auth.Metadata == nil {
+		return false
+	}
+	sessionToken, _ := auth.Metadata["session_token"].(string)
+	if strings.TrimSpace(sessionToken) == "" {
+		return false
+	}
+	refreshToken, _ := auth.Metadata["refresh_token"].(string)
+	return strings.TrimSpace(refreshToken) == ""
+}
+
+func (m *Manager) supplementCodexRefreshToken(ctx context.Context, auth *Auth) *Auth {
+	if m == nil || auth == nil {
+		return auth
+	}
+	if !shouldSupplementCodexRefreshToken(auth) {
+		return auth
+	}
+	m.refreshAuth(ctx, auth.ID)
+	if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
+		return updated
+	}
+	return auth
+}
+
+func (m *Manager) forceRefresh(ctx context.Context, authSnapshot *Auth) {
+	if m == nil || authSnapshot == nil {
+		return
+	}
+	if strings.TrimSpace(authSnapshot.ID) == "" {
+		return
+	}
+	m.refreshAuth(ctx, authSnapshot.ID)
 }
 
 func ensureModelState(auth *Auth, model string) *ModelState {

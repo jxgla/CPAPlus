@@ -2,7 +2,9 @@ package management
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -193,5 +195,196 @@ func TestDeleteAuthFile_BatchQuery(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(authDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("expected auth file %s to be removed, stat err: %v", name, err)
 		}
+	}
+}
+
+func TestListAuthFiles_ExposesCodexRefreshTokenMissingFlag(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	missingPath := filepath.Join(authDir, "missing.json")
+	okPath := filepath.Join(authDir, "ok.json")
+	for _, item := range []struct {
+		path string
+		data string
+	}{
+		{missingPath, `{"type":"codex","session_token":"session-only"}`},
+		{okPath, `{"type":"codex","session_token":"session","refresh_token":"refresh"}`},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.data), 0o600); err != nil {
+			t.Fatalf("write auth file: %v", err)
+		}
+		if err := h.registerAuthFromFile(context.Background(), item.path, []byte(item.data)); err != nil {
+			t.Fatalf("register auth from file: %v", err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	flags := map[string]bool{}
+	for _, file := range payload.Files {
+		name, _ := file["name"].(string)
+		flag, _ := file["codex_refresh_token_missing"].(bool)
+		flags[name] = flag
+	}
+	if !flags["missing.json"] {
+		t.Fatalf("expected missing.json to be flagged")
+	}
+	if flags["ok.json"] {
+		t.Fatalf("expected ok.json not to be flagged")
+	}
+}
+
+func TestSupplementCodexRefreshTokens_RefreshesEligibleAuths(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	refreshCalls := 0
+	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+		refreshCalls++
+		cloned := auth.Clone()
+		if cloned.Metadata == nil {
+			cloned.Metadata = map[string]any{}
+		}
+		cloned.Metadata["access_token"] = "fresh-access"
+		cloned.Metadata["refresh_token"] = "fresh-refresh"
+		return cloned, nil
+	}})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	items := []struct {
+		path string
+		data string
+	}{
+		{filepath.Join(authDir, "eligible.json"), `{"type":"codex","session_token":"session-only"}`},
+		{filepath.Join(authDir, "already.json"), `{"type":"codex","session_token":"session","refresh_token":"existing"}`},
+		{filepath.Join(authDir, "other.json"), `{"type":"claude","session_token":"session-only"}`},
+	}
+	for _, item := range items {
+		if err := os.WriteFile(item.path, []byte(item.data), 0o600); err != nil {
+			t.Fatalf("write auth file: %v", err)
+		}
+		if err := h.registerAuthFromFile(context.Background(), item.path, []byte(item.data)); err != nil {
+			t.Fatalf("register auth from file: %v", err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/codex-refresh-token/supplement", bytes.NewBufferString(`{"only_missing":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.SupplementCodexRefreshTokens(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected supplement status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("expected 1 refresh call, got %d", refreshCalls)
+	}
+
+	var payload struct {
+		Status  string         `json:"status"`
+		Summary map[string]any `json:"summary"`
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Status != "ok" {
+		t.Fatalf("status = %q, want ok", payload.Status)
+	}
+	if got := int(payload.Summary["succeeded"].(float64)); got != 1 {
+		t.Fatalf("succeeded = %d, want 1", got)
+	}
+	stored := h.findAuthByIdentifier("eligible.json")
+	if stored == nil {
+		t.Fatal("expected eligible auth")
+	}
+	if got, _ := stored.Metadata["refresh_token"].(string); got != "fresh-refresh" {
+		t.Fatalf("refresh_token = %q, want fresh-refresh", got)
+	}
+}
+
+func TestSupplementCodexRefreshTokens_ReturnsPartialOnRefreshFailure(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+		if auth != nil && auth.FileName == "bad.json" {
+			return nil, errors.New("boom")
+		}
+		cloned := auth.Clone()
+		if cloned.Metadata == nil {
+			cloned.Metadata = map[string]any{}
+		}
+		cloned.Metadata["refresh_token"] = "fresh-refresh"
+		return cloned, nil
+	}})
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	for _, item := range []struct {
+		path string
+		data string
+	}{
+		{filepath.Join(authDir, "good.json"), `{"type":"codex","session_token":"session-1"}`},
+		{filepath.Join(authDir, "bad.json"), `{"type":"codex","session_token":"session-2"}`},
+	} {
+		if err := os.WriteFile(item.path, []byte(item.data), 0o600); err != nil {
+			t.Fatalf("write auth file: %v", err)
+		}
+		if err := h.registerAuthFromFile(context.Background(), item.path, []byte(item.data)); err != nil {
+			t.Fatalf("register auth from file: %v", err)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/codex-refresh-token/supplement", bytes.NewBufferString(`{"only_missing":true}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	h.SupplementCodexRefreshTokens(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected supplement status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Status  string         `json:"status"`
+		Summary map[string]any `json:"summary"`
+		Results []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Status != "partial" {
+		t.Fatalf("status = %q, want partial", payload.Status)
+	}
+	if got := int(payload.Summary["failed"].(float64)); got != 1 {
+		t.Fatalf("failed = %d, want 1", got)
 	}
 }
