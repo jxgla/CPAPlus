@@ -53,33 +53,22 @@ const localManagementHTML = `<!doctype html>
     body { font-family: system-ui, sans-serif; margin: 24px; color: #111827; background: #f9fafb; }
     h1, h2 { margin-bottom: 12px; }
     .panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
-    button { border: 0; border-radius: 8px; padding: 10px 14px; background: #2563eb; color: #fff; cursor: pointer; }
-    button[disabled] { opacity: .6; cursor: not-allowed; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }
     .muted { color: #6b7280; }
-    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; }
-    .pill.warn { background: #fef3c7; color: #92400e; }
-    .pill.ok { background: #dcfce7; color: #166534; }
     pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #f9fafb; padding: 12px; border-radius: 8px; overflow-x: auto; }
   </style>
 </head>
 <body>
   <h1>CPA Management</h1>
   <div class="panel">
-    <h2>Codex refresh_token 补齐</h2>
-    <p class="muted">对缺少 refresh_token 但仍有 session_token 的 Codex auth 手动执行一次补齐，并写回文件。</p>
-    <button id="supplement-btn">补齐 Codex refresh_token</button>
-    <span id="summary" class="muted" style="margin-left:12px"></span>
-  </div>
-  <div class="panel">
     <h2>Auth Files</h2>
     <table>
       <thead>
-        <tr><th>Name</th><th>Provider</th><th>Email</th><th>Status</th><th>refresh_token</th></tr>
+        <tr><th>Name</th><th>Provider</th><th>Email</th><th>Status</th></tr>
       </thead>
       <tbody id="auth-rows">
-        <tr><td colspan="5" class="muted">Loading…</td></tr>
+        <tr><td colspan="4" class="muted">Loading…</td></tr>
       </tbody>
     </table>
   </div>
@@ -100,18 +89,15 @@ const localManagementHTML = `<!doctype html>
     function renderRows(files) {
       const tbody = document.getElementById('auth-rows');
       if (!Array.isArray(files) || files.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="muted">No auth files</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4" class="muted">No auth files</td></tr>';
         return;
       }
       tbody.innerHTML = files.map(file => {
-        const missing = !!file.codex_refresh_token_missing;
-        const badge = missing ? '<span class="pill warn">missing</span>' : '<span class="pill ok">ok</span>';
         return '<tr>' +
           '<td>' + (file.name || '') + '</td>' +
           '<td>' + (file.provider || file.type || '') + '</td>' +
           '<td>' + (file.email || '') + '</td>' +
           '<td>' + (file.status || '') + '</td>' +
-          '<td>' + badge + '</td>' +
         '</tr>';
       }).join('');
     }
@@ -119,27 +105,8 @@ const localManagementHTML = `<!doctype html>
     async function loadAuthFiles() {
       const data = await request('/v0/management/auth-files');
       renderRows(data.files || []);
-      const missing = (data.files || []).filter(x => x && x.codex_refresh_token_missing).length;
-      document.getElementById('summary').textContent = missing > 0 ? ('当前待补齐: ' + missing) : '当前没有缺失 refresh_token 的 Codex auth';
     }
 
-    async function supplement() {
-      const button = document.getElementById('supplement-btn');
-      const result = document.getElementById('result');
-      button.disabled = true;
-      result.textContent = '执行中...';
-      try {
-        const data = await request('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
-        result.textContent = JSON.stringify(data, null, 2);
-        await loadAuthFiles();
-      } catch (err) {
-        result.textContent = String(err && err.message ? err.message : err);
-      } finally {
-        button.disabled = false;
-      }
-    }
-
-    document.getElementById('supplement-btn').addEventListener('click', supplement);
     loadAuthFiles().catch(err => {
       document.getElementById('result').textContent = String(err && err.message ? err.message : err);
     });
@@ -147,254 +114,6 @@ const localManagementHTML = `<!doctype html>
 </body>
 </html>`
 
-const managementSupplementSnippet = `<script>
-(function(){
-  if (window.__CPA_CODEX_REFRESH_SUPPLEMENT__) return;
-  window.__CPA_CODEX_REFRESH_SUPPLEMENT__ = true;
-
-  const STORAGE_KEY = 'cpa_management_key';
-
-  function getManagementKey() {
-    try { return (localStorage.getItem(STORAGE_KEY) || '').trim(); } catch { return ''; }
-  }
-
-  function setManagementKey(value) {
-    try {
-      if ((value || '').trim()) localStorage.setItem(STORAGE_KEY, value.trim());
-      else localStorage.removeItem(STORAGE_KEY);
-    } catch {}
-  }
-
-  function buildHeaders(extra) {
-    const headers = Object.assign({'Content-Type':'application/json'}, extra || {});
-    const key = getManagementKey();
-    if (key) headers['Authorization'] = 'Bearer ' + key;
-    return headers;
-  }
-
-  async function request(path, options) {
-    const response = await fetch(path, Object.assign({}, options || {}, { headers: buildHeaders((options && options.headers) || {}) }));
-    const text = await response.text();
-    let data = {};
-    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-    if (!response.ok) {
-      const msg = data.error || data.message || text || ('HTTP ' + response.status);
-      const err = new Error(msg);
-      err.status = response.status;
-      throw err;
-    }
-    return data;
-  }
-
-  async function requestWithKeyRetry(path, options) {
-    try {
-      return await request(path, options);
-    } catch (err) {
-      const msg = String(err && err.message ? err.message : err || '');
-      if (msg.includes('missing management key') || msg.includes('invalid management key')) {
-        const input = window.prompt('请输入 management key', getManagementKey());
-        if (input === null) throw err;
-        setManagementKey(input);
-        return await request(path, options);
-      }
-      throw err;
-    }
-  }
-
-  function ensureStyles() {
-    if (document.getElementById('cpa-codex-refresh-style')) return;
-    const style = document.createElement('style');
-    style.id = 'cpa-codex-refresh-style';
-    style.textContent = '.cpa-inline-rt-btn{border:0;border-radius:8px;padding:8px 12px;background:#2563eb;color:#fff;cursor:pointer;white-space:nowrap;}.cpa-inline-rt-btn[disabled]{opacity:.6;cursor:not-allowed;}.cpa-inline-rt-note{margin-left:8px;font-size:12px;color:#6b7280;}.cpa-inline-rt-result{margin-top:8px;white-space:pre-wrap;word-break:break-word;font-size:12px;color:#374151;}';
-    document.head.appendChild(style);
-  }
-
-  function findToolbarAnchor() {
-    const buttons = Array.from(document.querySelectorAll('button'));
-    const refreshBtn = buttons.find(btn => /刷新/.test((btn.textContent || '').trim()));
-    const uploadBtn = buttons.find(btn => /上传文件/.test((btn.textContent || '').trim()));
-    const deleteAllBtn = buttons.find(btn => /删除全部/.test((btn.textContent || '').trim()));
-    if (refreshBtn && uploadBtn && deleteAllBtn) {
-      return { refreshBtn, uploadBtn, deleteAllBtn, parent: refreshBtn.parentElement };
-    }
-    return null;
-  }
-
-  function ensureInlineUI() {
-    ensureStyles();
-    if (document.getElementById('cpa-inline-rt-btn')) return true;
-    const anchor = findToolbarAnchor();
-    if (!anchor || !anchor.parent) return false;
-
-    const wrap = document.createElement('div');
-    wrap.id = 'cpa-inline-rt-wrap';
-    wrap.style.display = 'inline-flex';
-    wrap.style.alignItems = 'center';
-    wrap.style.gap = '8px';
-    wrap.style.marginRight = '8px';
-
-    const btn = document.createElement('button');
-    btn.id = 'cpa-inline-rt-btn';
-    btn.className = 'cpa-inline-rt-btn';
-    btn.textContent = '补齐RT';
-
-    const note = document.createElement('span');
-    note.id = 'cpa-inline-rt-note';
-    note.className = 'cpa-inline-rt-note';
-    note.textContent = '加载中...';
-
-    wrap.appendChild(btn);
-    wrap.appendChild(note);
-
-    anchor.parent.insertBefore(wrap, anchor.refreshBtn);
-
-    const result = document.createElement('div');
-    result.id = 'cpa-inline-rt-result';
-    result.className = 'cpa-inline-rt-result';
-    anchor.parent.parentElement && anchor.parent.parentElement.appendChild(result);
-    return true;
-  }
-
-  async function refreshSummary() {
-    const note = document.getElementById('cpa-inline-rt-note');
-    if (!note) return;
-    try {
-      const data = await requestWithKeyRetry('/v0/management/auth-files');
-      const files = Array.isArray(data.files) ? data.files : [];
-      const missing = files.filter(file => file && file.codex_refresh_token_missing).length;
-      note.textContent = missing > 0 ? ('待补齐: ' + missing) : '无需补齐';
-    } catch (err) {
-      note.textContent = String(err && err.message ? err.message : err);
-    }
-  }
-
-  async function supplement() {
-    const btn = document.getElementById('cpa-inline-rt-btn');
-    const result = document.getElementById('cpa-inline-rt-result');
-    if (btn) btn.disabled = true;
-    if (result) result.textContent = '执行中...';
-    try {
-      const data = await requestWithKeyRetry('/v0/management/auth-files/codex-refresh-token/supplement', { method: 'POST', body: JSON.stringify({ only_missing: true }) });
-      if (result) {
-        const summary = (data && data.summary) ? data.summary : data;
-        let text = '补齐完成：' + JSON.stringify(summary || {}, null, 2);
-        const reasons = summary && summary.failed_reasons;
-        if (reasons && Object.keys(reasons).length > 0) {
-          const failedDetails = (Array.isArray(data && data.results) ? data.results : [])
-            .filter(item => item && item.action === 'failed')
-            .slice(0, 5)
-            .map(item => ({
-              name: item.name,
-              reason: item.reason,
-              error: item.error,
-              session_token_present: item.session_token_present,
-              refresh_token_present: item.refresh_token_present,
-            }));
-          text += '\n\n失败明细(最多5条)：' + JSON.stringify(failedDetails, null, 2);
-        }
-        result.textContent = text;
-      }
-      await refreshSummary();
-    } catch (err) {
-      if (result) result.textContent = String(err && err.message ? err.message : err);
-    } finally {
-      if (btn) btn.disabled = false;
-    }
-  }
-
-  document.addEventListener('click', function(event){
-    if (event && event.target && event.target.id === 'cpa-inline-rt-btn') {
-      supplement();
-    }
-  });
-
-  let ensureUITimer = null;
-
-  function scheduleEnsureUI() {
-    if (ensureUITimer) return;
-    ensureUITimer = setTimeout(function(){
-      ensureUITimer = null;
-      const existsBefore = !!document.getElementById('cpa-inline-rt-btn');
-      const ready = ensureInlineUI();
-      if (!ready) return;
-      if (!existsBefore) {
-        refreshSummary();
-      }
-    }, 80);
-  }
-
-  function installRouteHooks() {
-    if (window.__CPA_CODEX_REFRESH_SUPPLEMENT_ROUTE_HOOKED__) return;
-    window.__CPA_CODEX_REFRESH_SUPPLEMENT_ROUTE_HOOKED__ = true;
-
-    const rawPushState = history.pushState;
-    if (typeof rawPushState === 'function') {
-      history.pushState = function() {
-        const out = rawPushState.apply(this, arguments);
-        scheduleEnsureUI();
-        return out;
-      };
-    }
-
-    const rawReplaceState = history.replaceState;
-    if (typeof rawReplaceState === 'function') {
-      history.replaceState = function() {
-        const out = rawReplaceState.apply(this, arguments);
-        scheduleEnsureUI();
-        return out;
-      };
-    }
-
-    window.addEventListener('popstate', scheduleEnsureUI);
-    window.addEventListener('hashchange', scheduleEnsureUI);
-  }
-
-  function installObserver() {
-    if (window.__CPA_CODEX_REFRESH_SUPPLEMENT_OBSERVER__) return;
-    const target = document.body || document.documentElement;
-    if (!target || typeof MutationObserver === 'undefined') return;
-
-    const observer = new MutationObserver(function(mutations){
-      for (const mutation of mutations || []) {
-        if (mutation.type === 'childList' && ((mutation.addedNodes && mutation.addedNodes.length) || (mutation.removedNodes && mutation.removedNodes.length))) {
-          scheduleEnsureUI();
-          break;
-        }
-      }
-    });
-    observer.observe(target, { childList: true, subtree: true });
-    window.__CPA_CODEX_REFRESH_SUPPLEMENT_OBSERVER__ = observer;
-  }
-
-  function boot() {
-    ensureStyles();
-    installRouteHooks();
-    installObserver();
-    scheduleEnsureUI();
-
-    let retries = 0;
-    const timer = setInterval(function(){
-      retries += 1;
-      scheduleEnsureUI();
-      if (document.getElementById('cpa-inline-rt-btn') || retries >= 60) {
-        clearInterval(timer);
-      }
-    }, 1000);
-  }
-
-  boot();
-})();
-</script>`
-
-func injectManagementSupplementHTML(body string) string {
-	if strings.Contains(body, "/v0/management/auth-files/codex-refresh-token/supplement") {
-		return body
-	}
-	if strings.Contains(strings.ToLower(body), "</body>") {
-		return strings.Replace(body, "</body>", managementSupplementSnippet+"</body>", 1)
-	}
-	return body + managementSupplementSnippet
-}
 
 type serverOptionConfig struct {
 	extraMiddleware      []gin.HandlerFunc
@@ -1018,7 +737,6 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 			mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 			mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
-			mgmt.POST("/auth-files/codex-refresh-token/supplement", s.mgmt.SupplementCodexRefreshTokens)
 			mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
@@ -1090,7 +808,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
-	c.String(http.StatusOK, injectManagementSupplementHTML(string(data)))
+	c.String(http.StatusOK, string(data))
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {

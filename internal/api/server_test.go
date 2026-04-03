@@ -209,9 +209,9 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	}
 }
 
-func TestServeManagementControlPanel_FallsBackToLocalHTML(t *testing.T) {
+func TestServeManagementControlPanel_ExcludesSupplementUI(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-secret")
-	t.Setenv("MANAGEMENT_STATIC_PATH", "")
+	t.Setenv("MANAGEMENT_STATIC_PATH", filepath.Join(t.TempDir(), "static"))
 	t.Setenv("WRITABLE_PATH", "")
 	t.Setenv("writable_path", "")
 
@@ -233,19 +233,13 @@ func TestServeManagementControlPanel_FallsBackToLocalHTML(t *testing.T) {
 		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "补齐RT") {
-		t.Fatalf("expected injected supplement button, got %s", body)
+	if !strings.Contains(strings.ToLower(body), "management") {
+		t.Fatalf("expected management page content, got %s", body)
 	}
-	if !strings.Contains(body, "cpa_management_key") {
-		t.Fatalf("expected management key storage hook, got %s", body)
+	if strings.Contains(body, "补齐RT") {
+		t.Fatalf("did not expect supplement button, got %s", body)
 	}
-	if !strings.Contains(body, "MutationObserver") {
-		t.Fatalf("expected mutation observer based reinjection hook, got %s", body)
-	}
-	if !strings.Contains(body, "history.pushState") || !strings.Contains(body, "history.replaceState") {
-		t.Fatalf("expected SPA history hooks for reinjection, got %s", body)
-	}
-	if !strings.Contains(body, "failed_reasons") || !strings.Contains(body, "失败明细(最多5条)") {
-		t.Fatalf("expected supplement failure detail rendering, got %s", body)
+	if strings.Contains(body, "failed_reasons") || strings.Contains(body, "失败明细(最多5条)") {
+		t.Fatalf("did not expect supplement failure details, got %s", body)
 	}
 }

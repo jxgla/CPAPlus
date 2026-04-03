@@ -512,7 +512,7 @@ func TestManager_Execute_CodexUnauthorizedForcesRefresh(t *testing.T) {
 	}
 }
 
-func TestManager_Execute_CodexQuotaWithMissingRefreshTokenForcesRefresh(t *testing.T) {
+func TestManager_Execute_CodexQuotaNoLongerBackfillsMissingRefreshToken(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &codexForceRefreshExecutor{executeErr: &Error{HTTPStatus: http.StatusTooManyRequests, Message: "quota"}}
 	m.RegisterExecutor(executor)
@@ -541,8 +541,8 @@ func TestManager_Execute_CodexQuotaWithMissingRefreshTokenForcesRefresh(t *testi
 		t.Fatalf("expected execute error")
 	}
 
-	if calls := executor.RefreshCalls(); calls != 1 {
-		t.Fatalf("expected refresh to be called once, got %d", calls)
+	if calls := executor.RefreshCalls(); calls != 0 {
+		t.Fatalf("expected refresh to not be called, got %d", calls)
 	}
 
 	updated, ok := m.GetByID(auth.ID)
@@ -550,12 +550,12 @@ func TestManager_Execute_CodexQuotaWithMissingRefreshTokenForcesRefresh(t *testi
 		t.Fatalf("expected auth to exist")
 	}
 	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
-	if gotRefresh != "forced-refresh-token" {
-		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	if gotRefresh != "" {
+		t.Fatalf("refresh_token = %q, want empty", gotRefresh)
 	}
 }
 
-func TestManager_Execute_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *testing.T) {
+func TestManager_Execute_CodexWithoutRefreshTokenDoesNotSupplementBeforeCall(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &codexForceRefreshExecutor{}
 	m.RegisterExecutor(executor)
@@ -586,8 +586,8 @@ func TestManager_Execute_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *t
 		t.Fatalf("payload = %q, want %q", string(resp.Payload), "ok")
 	}
 
-	if calls := executor.RefreshCalls(); calls != 1 {
-		t.Fatalf("expected refresh to be called once, got %d", calls)
+	if calls := executor.RefreshCalls(); calls != 0 {
+		t.Fatalf("expected refresh to not be called, got %d", calls)
 	}
 
 	updated, ok := m.GetByID(auth.ID)
@@ -595,12 +595,12 @@ func TestManager_Execute_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *t
 		t.Fatalf("expected auth to exist")
 	}
 	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
-	if gotRefresh != "forced-refresh-token" {
-		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	if gotRefresh != "" {
+		t.Fatalf("refresh_token = %q, want empty", gotRefresh)
 	}
 }
 
-func TestManager_ExecuteCount_CodexMissingRefreshTokenGetsSupplementedBeforeCall(t *testing.T) {
+func TestManager_ExecuteCount_CodexWithoutRefreshTokenDoesNotSupplementBeforeCall(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &codexForceRefreshExecutor{}
 	m.RegisterExecutor(executor)
@@ -631,8 +631,8 @@ func TestManager_ExecuteCount_CodexMissingRefreshTokenGetsSupplementedBeforeCall
 		t.Fatalf("count payload = %q, want %q", string(resp.Payload), "count-ok")
 	}
 
-	if calls := executor.RefreshCalls(); calls != 1 {
-		t.Fatalf("expected refresh to be called once, got %d", calls)
+	if calls := executor.RefreshCalls(); calls != 0 {
+		t.Fatalf("expected refresh to not be called, got %d", calls)
 	}
 
 	updated, ok := m.GetByID(auth.ID)
@@ -640,8 +640,8 @@ func TestManager_ExecuteCount_CodexMissingRefreshTokenGetsSupplementedBeforeCall
 		t.Fatalf("expected auth to exist")
 	}
 	gotRefresh, _ := updated.Metadata["refresh_token"].(string)
-	if gotRefresh != "forced-refresh-token" {
-		t.Fatalf("refresh_token = %q, want %q", gotRefresh, "forced-refresh-token")
+	if gotRefresh != "" {
+		t.Fatalf("refresh_token = %q, want empty", gotRefresh)
 	}
 }
 

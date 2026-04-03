@@ -142,7 +142,7 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 }
 
-func TestResolveTokenForAuthRefreshesCodexAndPersists(t *testing.T) {
+func TestResolveTokenForAuthReturnsExistingCodexToken(t *testing.T) {
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
 	manager.RegisterExecutor(&stubProviderExecutor{refresh: func(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -173,15 +173,15 @@ func TestResolveTokenForAuthRefreshesCodexAndPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveTokenForAuth returned error: %v", err)
 	}
-	if token != "fresh_access" {
-		t.Fatalf("token = %q, want fresh_access", token)
+	if token != "stale_access" {
+		t.Fatalf("token = %q, want stale_access", token)
 	}
 
 	stored, ok := manager.GetByID(auth.ID)
 	if !ok || stored == nil {
 		t.Fatal("expected persisted auth in manager")
 	}
-	if got := tokenValueFromMetadata(stored.Metadata); got != "fresh_access" {
-		t.Fatalf("persisted access token = %q, want fresh_access", got)
+	if got := tokenValueFromMetadata(stored.Metadata); got != "stale_access" {
+		t.Fatalf("persisted access token = %q, want stale_access", got)
 	}
 }

@@ -51,6 +51,37 @@ func codexMarkUnauthorizedRetried(ctx context.Context) context.Context {
 	return context.WithValue(ctx, codexUnauthorizedRetryKey{}, true)
 }
 
+func codexCanRefresh(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	if refreshToken, _ := auth.Metadata["refresh_token"].(string); strings.TrimSpace(refreshToken) != "" {
+		return true
+	}
+	if sessionToken, _ := auth.Metadata["session_token"].(string); strings.TrimSpace(sessionToken) != "" {
+		return true
+	}
+	return false
+}
+
+func retryCodexUnauthorizedOnce(ctx context.Context, auth *cliproxyauth.Auth, unauthorizedErr error, refresh func(context.Context, *cliproxyauth.Auth) (*cliproxyauth.Auth, error), retry func(context.Context, *cliproxyauth.Auth) error) error {
+	if unauthorizedErr == nil || refresh == nil || retry == nil {
+		return unauthorizedErr
+	}
+	if codexUnauthorizedRetried(ctx) || !codexCanRefresh(auth) {
+		return unauthorizedErr
+	}
+	refreshedAuth, err := refresh(ctx, auth)
+	if err != nil {
+		logWithRequestID(ctx).Warnf("codex executor: refresh after 401 failed: %v", err)
+		return unauthorizedErr
+	}
+	if refreshedAuth == nil {
+		return unauthorizedErr
+	}
+	return retry(codexMarkUnauthorizedRetried(ctx), refreshedAuth)
+}
+
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type CodexExecutor struct {
@@ -170,6 +201,27 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode == http.StatusUnauthorized {
+		unauthorizedBody, readErr := io.ReadAll(httpResp.Body)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			return resp, readErr
+		}
+		appendAPIResponseChunk(ctx, e.cfg, unauthorizedBody)
+		unauthorizedErr := newCodexStatusErr(httpResp.StatusCode, unauthorizedBody)
+		if retryErr := retryCodexUnauthorizedOnce(ctx, auth, unauthorizedErr, e.Refresh, func(retryCtx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			retriedResp, retryExecErr := e.Execute(retryCtx, refreshedAuth, req, opts)
+			if retryExecErr != nil {
+				return retryExecErr
+			}
+			resp = retriedResp
+			return nil
+		}); retryErr == nil {
+			return resp, nil
+		}
+		err = unauthorizedErr
+		return resp, err
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -275,6 +327,27 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode == http.StatusUnauthorized {
+		unauthorizedBody, readErr := io.ReadAll(httpResp.Body)
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			return resp, readErr
+		}
+		appendAPIResponseChunk(ctx, e.cfg, unauthorizedBody)
+		unauthorizedErr := newCodexStatusErr(httpResp.StatusCode, unauthorizedBody)
+		if retryErr := retryCodexUnauthorizedOnce(ctx, auth, unauthorizedErr, e.Refresh, func(retryCtx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			retriedResp, retryExecErr := e.executeCompact(retryCtx, refreshedAuth, req, opts)
+			if retryExecErr != nil {
+				return retryExecErr
+			}
+			resp = retriedResp
+			return nil
+		}); retryErr == nil {
+			return resp, nil
+		}
+		err = unauthorizedErr
+		return resp, err
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -367,6 +440,28 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	if httpResp.StatusCode == http.StatusUnauthorized {
+		data, readErr := io.ReadAll(httpResp.Body)
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close response body error: %v", errClose)
+		}
+		if readErr != nil {
+			recordAPIResponseError(ctx, e.cfg, readErr)
+			return nil, readErr
+		}
+		appendAPIResponseChunk(ctx, e.cfg, data)
+		unauthorizedErr := newCodexStatusErr(httpResp.StatusCode, data)
+		var retriedStream *cliproxyexecutor.StreamResult
+		if retryErr := retryCodexUnauthorizedOnce(ctx, auth, unauthorizedErr, e.Refresh, func(retryCtx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			var retryExecErr error
+			retriedStream, retryExecErr = e.ExecuteStream(retryCtx, refreshedAuth, req, opts)
+			return retryExecErr
+		}); retryErr == nil {
+			return retriedStream, nil
+		}
+		err = unauthorizedErr
+		return nil, err
+	}
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {

@@ -1,10 +1,14 @@
 package executor
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"testing"
 	"time"
+
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 func TestParseCodexRetryAfter(t *testing.T) {
@@ -58,6 +62,125 @@ func TestParseCodexRetryAfter(t *testing.T) {
 			t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
 		}
 	})
+}
+
+func TestRetryCodexUnauthorizedOnce_RetriesAfterRefresh(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"refresh_token": "refresh-token"}}
+	unauthorizedErr := statusErr{code: http.StatusUnauthorized, msg: "unauthorized"}
+	refreshCalls := 0
+	retryCalls := 0
+
+	err := retryCodexUnauthorizedOnce(context.Background(), auth, unauthorizedErr,
+		func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+			refreshCalls++
+			cloned := auth.Clone()
+			if cloned.Metadata == nil {
+				cloned.Metadata = map[string]any{}
+			}
+			cloned.Metadata["access_token"] = "fresh-access"
+			return cloned, nil
+		},
+		func(ctx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			retryCalls++
+			if !codexUnauthorizedRetried(ctx) {
+				t.Fatalf("expected retry context to be marked retried")
+			}
+			if got, _ := refreshedAuth.Metadata["access_token"].(string); got != "fresh-access" {
+				t.Fatalf("access_token = %q, want fresh-access", got)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("retryCodexUnauthorizedOnce returned error: %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want 1", refreshCalls)
+	}
+	if retryCalls != 1 {
+		t.Fatalf("retryCalls = %d, want 1", retryCalls)
+	}
+}
+
+func TestRetryCodexUnauthorizedOnce_SkipsWhenAlreadyRetried(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"session_token": "session-token"}}
+	unauthorizedErr := statusErr{code: http.StatusUnauthorized, msg: "unauthorized"}
+	refreshCalls := 0
+	retryCalls := 0
+
+	err := retryCodexUnauthorizedOnce(codexMarkUnauthorizedRetried(context.Background()), auth, unauthorizedErr,
+		func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+			refreshCalls++
+			return auth, nil
+		},
+		func(ctx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			retryCalls++
+			return nil
+		},
+	)
+	if !errors.Is(err, unauthorizedErr) {
+		t.Fatalf("expected original unauthorized error, got %v", err)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("refreshCalls = %d, want 0", refreshCalls)
+	}
+	if retryCalls != 0 {
+		t.Fatalf("retryCalls = %d, want 0", retryCalls)
+	}
+}
+
+func TestRetryCodexUnauthorizedOnce_SkipsWithoutRefreshableTokens(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"access_token": "access-only"}}
+	unauthorizedErr := statusErr{code: http.StatusUnauthorized, msg: "unauthorized"}
+	refreshCalls := 0
+	retryCalls := 0
+
+	err := retryCodexUnauthorizedOnce(context.Background(), auth, unauthorizedErr,
+		func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+			refreshCalls++
+			return auth, nil
+		},
+		func(ctx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			retryCalls++
+			return nil
+		},
+	)
+	if !errors.Is(err, unauthorizedErr) {
+		t.Fatalf("expected original unauthorized error, got %v", err)
+	}
+	if refreshCalls != 0 {
+		t.Fatalf("refreshCalls = %d, want 0", refreshCalls)
+	}
+	if retryCalls != 0 {
+		t.Fatalf("retryCalls = %d, want 0", retryCalls)
+	}
+}
+
+func TestRetryCodexUnauthorizedOnce_ReturnsOriginalErrorOnRefreshFailure(t *testing.T) {
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{"refresh_token": "refresh-token"}}
+	unauthorizedErr := statusErr{code: http.StatusUnauthorized, msg: "unauthorized"}
+	refreshCalls := 0
+	retryCalls := 0
+
+	err := retryCodexUnauthorizedOnce(context.Background(), auth, unauthorizedErr,
+		func(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+			refreshCalls++
+			return nil, errors.New("refresh failed")
+		},
+		func(ctx context.Context, refreshedAuth *cliproxyauth.Auth) error {
+			retryCalls++
+			return nil
+		},
+	)
+	if !errors.Is(err, unauthorizedErr) {
+		t.Fatalf("expected original unauthorized error, got %v", err)
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls = %d, want 1", refreshCalls)
+	}
+	if retryCalls != 0 {
+		t.Fatalf("retryCalls = %d, want 0", retryCalls)
+	}
 }
 
 func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {

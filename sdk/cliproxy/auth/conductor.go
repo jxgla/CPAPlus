@@ -1100,10 +1100,6 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		auth = m.supplementCodexRefreshToken(execCtx, auth)
-		if auth == nil {
-			continue
-		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1182,10 +1178,6 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		auth = m.supplementCodexRefreshToken(execCtx, auth)
-		if auth == nil {
-			continue
-		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1272,10 +1264,6 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
 
-		auth = m.supplementCodexRefreshToken(execCtx, auth)
-		if auth == nil {
-			continue
-		}
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1862,107 +1850,9 @@ func shouldForceCodexRefresh(auth *Auth, result Result) bool {
 	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
 		return false
 	}
-	status := statusCodeFromResult(result.Error)
-	if status != http.StatusUnauthorized && status != http.StatusTooManyRequests {
-		return false
-	}
-	if status == http.StatusUnauthorized {
-		return true
-	}
-	return CodexRefreshTokenNeedsSupplement(auth)
+	return statusCodeFromResult(result.Error) == http.StatusUnauthorized
 }
 
-const (
-	CodexStage1SessionRecoveryFailedCode = "stage1_session_recovery_failed"
-	CodexRefreshTokenMissingCode         = "codex_refresh_token_missing"
-)
-
-func CodexSessionTokenPresent(auth *Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	sessionToken, _ := auth.Metadata["session_token"].(string)
-	return strings.TrimSpace(sessionToken) != ""
-}
-
-func CodexRefreshTokenPresent(auth *Auth) bool {
-	if auth == nil || auth.Metadata == nil {
-		return false
-	}
-	refreshToken, _ := auth.Metadata["refresh_token"].(string)
-	return strings.TrimSpace(refreshToken) != ""
-}
-
-func CodexRefreshTokenNeedsSupplement(auth *Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-		return false
-	}
-	return !CodexRefreshTokenPresent(auth)
-}
-
-func shouldSupplementCodexRefreshToken(auth *Auth) bool {
-	return CodexRefreshTokenNeedsSupplement(auth)
-}
-
-func (m *Manager) RecoverCodexTokens(ctx context.Context, auth *Auth) (*Auth, error) {
-	return m.recoverCodexTokens(ctx, auth, false)
-}
-
-func (m *Manager) RecoverCodexTokensForced(ctx context.Context, auth *Auth) (*Auth, error) {
-	return m.recoverCodexTokens(ctx, auth, true)
-}
-
-func (m *Manager) recoverCodexTokens(ctx context.Context, auth *Auth, force bool) (*Auth, error) {
-	if m == nil || auth == nil {
-		return auth, nil
-	}
-	if !CodexRefreshTokenNeedsSupplement(auth) {
-		return auth, nil
-	}
-	if !force && !auth.NextRefreshAfter.IsZero() && time.Now().Before(auth.NextRefreshAfter) {
-		if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
-			return updated, nil
-		}
-		return auth, nil
-	}
-	m.refreshAuth(ctx, auth.ID)
-	if updated, ok := m.GetByID(auth.ID); ok && updated != nil {
-		if CodexRefreshTokenNeedsSupplement(updated) {
-			errorCode := CodexRefreshTokenMissingCode
-			errorMessage := "codex refresh token remains missing after staged recovery"
-			if !CodexSessionTokenPresent(updated) {
-				errorCode = CodexStage1SessionRecoveryFailedCode
-				errorMessage = "codex session token remains missing after staged recovery"
-			}
-			return updated, &Error{Code: errorCode, Message: errorMessage}
-		}
-		return updated, nil
-	}
-	if CodexRefreshTokenNeedsSupplement(auth) {
-		errorCode := CodexRefreshTokenMissingCode
-		errorMessage := "codex refresh token remains missing after staged recovery"
-		if !CodexSessionTokenPresent(auth) {
-			errorCode = CodexStage1SessionRecoveryFailedCode
-			errorMessage = "codex session token remains missing after staged recovery"
-		}
-		return auth, &Error{Code: errorCode, Message: errorMessage}
-	}
-	return auth, nil
-}
-
-func (m *Manager) supplementCodexRefreshToken(ctx context.Context, auth *Auth) *Auth {
-	updated, err := m.RecoverCodexTokens(ctx, auth)
-	if err != nil {
-		log.WithError(err).Debug("codex preflight supplement failed")
-	}
-	if updated != nil {
-		return updated
-	}
-	return auth
-}
 
 func (m *Manager) forceRefresh(ctx context.Context, authSnapshot *Auth) {
 	if m == nil || authSnapshot == nil {

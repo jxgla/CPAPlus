@@ -325,15 +325,6 @@ func (h *Handler) resolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		token, errToken := h.refreshAntigravityOAuthAccessToken(ctx, auth)
 		return token, errToken
 	}
-	if provider == "codex" && h != nil && h.authManager != nil {
-		updated, errRecover := h.authManager.RecoverCodexTokensForced(ctx, auth)
-		if updated != nil {
-			auth = updated
-		}
-		if errRecover != nil {
-			return "", errRecover
-		}
-	}
 
 	return tokenValueForAuth(auth), nil
 }
